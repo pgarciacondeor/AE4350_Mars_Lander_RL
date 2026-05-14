@@ -16,17 +16,27 @@ class ActorCritic(nn.Module):
     @nn.compact
     def __call__(self, x):
         
+        scale_factors = jnp.array([
+            100.0, 100.0, 1000.0,  
+            10.0, 10.0, 100.0,    
+            1.0, 1.0, 1.0, 1.0,    
+            5.0, 5.0, 5.0,         
+            2000.0                
+        ])
+        
+        x = x / scale_factors
+
         x = nn.Dense(256)(x)
         x = nn.relu(x)
         x = nn.Dense(256)(x)
         x = nn.relu(x)
 
-        # Critic head 
+        # Critic Head (Value function V(s))
         critic_hidden = nn.Dense(128)(x)
         critic_hidden = nn.relu(critic_hidden)
         value = nn.Dense(1)(critic_hidden)
 
-        # Actor head 
+        # Actor Head (Stochastic Policy pi(a|s))
         actor_hidden = nn.Dense(128)(x)
         actor_hidden = nn.relu(actor_hidden)
         
