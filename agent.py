@@ -30,7 +30,7 @@ class ActorCritic(nn.Module):
         actor_hidden = nn.Dense(128)(x)
         actor_hidden = nn.relu(actor_hidden)
         
-        # Mean of the action distributio
+        # Mean of the action distribution
         mean = nn.Dense(self.action_dim)(actor_hidden)
         mean = nn.sigmoid(mean)
         
