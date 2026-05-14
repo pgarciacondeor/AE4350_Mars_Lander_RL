@@ -14,7 +14,7 @@ import agent
 # Hyperparameters
 NUM_ENVS = 1000             
 NUM_STEPS = 200             
-TOTAL_UPDATES = 500         
+TOTAL_UPDATES = 1000         
 LEARNING_RATE = 3e-4
 GAMMA = 0.99                
 GAE_LAMBDA = 0.95           # Smoothing factor for advantage
