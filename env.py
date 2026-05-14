@@ -15,13 +15,25 @@ class EnvState(NamedTuple):
     done: jnp.bool_
 
 @jax.jit
+def get_terrain_elevation(x, y):
+    """
+    Creates a procedural 3D terrain mimicking the foothills of Mount Sharp inside Gale Crater.
+    The center (0,0) is a mountain peak, surrounded by lower crater features.
+    """
+    # A central mountain peak of 500m
+    mountain = 500.0 * jnp.exp(-(x**2 + y**2) / 10000.0) 
+    # Wavy surface topography 
+    ridges = 20.0 * jnp.sin(x / 20.0) * jnp.cos(y / 20.0)
+    return mountain + ridges
+
+@jax.jit
 def reset(key: jax.random.PRNGKey) -> EnvState:
     """Initializes the Mars Lander at the start of the powered descent."""
     keys = jax.random.split(key, 4)
     
     # Randomize initial altitude and lateral drift
     x_y = jax.random.uniform(keys[0], shape=(2,), minval=-50.0, maxval=50.0)
-    z = jax.random.uniform(keys[1], shape=(1,), minval=1500.0, maxval=2000.0)
+    z = jax.random.uniform(keys[1], shape=(1,), minval=800.0, maxval=1000.0)
     pos = jnp.concatenate([x_y, z])
     
     # Randomize initial downward velocity
@@ -59,8 +71,8 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     
     # Continuous Rewards
 
-    # Distance from target landing pad
-    distance_penalty = -0.01 * jnp.linalg.norm(pos)
+    target_pos = jnp.array([0.0, 0.0, 520.0])
+    distance_penalty = -0.01 * jnp.linalg.norm(pos - target_pos)
     
     # High velocities
     velocity_penalty = -0.05 * jnp.linalg.norm(vel)
@@ -77,8 +89,8 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     step_reward = distance_penalty + velocity_penalty + upright_penalty + spin_penalty + throttle_penalty
     
     # Terminal Rewards
-
-    is_grounded = z <= 0.0
+    ground_z = get_terrain_elevation(pos[0], pos[1])
+    is_grounded = z <= ground_z
     
     # Landing logic - grounded, slow, and upright
     safe_impact = (vz >= SAFE_Z_VELOCITY) & (jnp.linalg.norm(vel[0:2]) <= SAFE_XY_VELOCITY)
@@ -107,10 +119,13 @@ def step(env_state: EnvState, action: jnp.ndarray) -> tuple[EnvState, jnp.ndarra
     
     next_physics_state = euler_step(env_state.physics_state, clipped_action, DT)
     
-    z = next_physics_state[2]
+    pos = next_physics_state[0:3]
+    z = pos[2]
     mass = next_physics_state[13]
     
-    hit_ground = z <= 0.0
+    ground_z = get_terrain_elevation(pos[0], pos[1])
+    hit_ground = z <= ground_z
+
     out_of_time = env_state.time_step >= MAX_STEPS
     out_of_fuel = mass <= DRY_MASS
     flew_away = z > 3000.0

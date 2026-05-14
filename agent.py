@@ -57,7 +57,6 @@ def calc_log_prob(action, mean, log_std):
     return jnp.sum(log_prob, axis=-1)
 
 # Proximal Policy Optimization (PPO) loss function
-@jax.jit
 def ppo_loss_fn(params, apply_fn, states, actions, old_log_probs, advantages, returns, clip_ratio=0.2, vf_coef=0.5, ent_coef=0.01):
     """Calculates the PPO clipped surrogate loss, value loss, and entropy bonus."""
     
