@@ -1,5 +1,8 @@
-jax[cuda]
-flax
-optax
+jax==0.4.23
+jaxlib==0.4.23
+flax==0.7.5
+optax==0.1.8
+chex==0.1.8
 numpy<2.0.0
+scipy==1.11.4
 matplotlib
