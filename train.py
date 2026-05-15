@@ -104,7 +104,11 @@ def main():
 
     with open('training_log.csv', 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Policy_Loss', 'Value_Loss', 'Time'])
+        writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m', 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Time'])
+    
+    if update % 100 == 0 and update > 0:
+        with open(f'model_weights_checkpoint_{update:04d}.pkl', 'wb') as backup_file:
+            pickle.dump(train_state.params, backup_file)
 
     for update in range(TOTAL_UPDATES):
         
@@ -180,22 +184,44 @@ def main():
 
         if update % 10 == 0:
             avg_reward = jnp.mean(jnp.sum(batch_rewards, axis=0))
-            elapsed = time.time() - start_time
-
+            
             total_dones = jnp.sum(batch_dones)
-            avg_ep_length = (NUM_ENVS * NUM_STEPS) / jnp.maximum(1.0, total_dones)
+            avg_ep_length = (NUM_ENVS * NUM_STEPS) / jnp.maximum(1.0, total_dones) 
+            
+            scale_factors = jnp.array([
+                100.0, 100.0, 1000.0,  # X, Y, Z
+                10.0, 10.0, 100.0,     # Vx, Vy, Vz
+                1.0, 1.0, 1.0, 1.0,    # Quaternions
+                5.0, 5.0, 5.0,         # Angular velocity
+                2000.0                 # Mass
+            ])
+            raw_states = batch_obs * scale_factors
+            
+            terminal_states = raw_states[batch_dones]
+            
+            if len(terminal_states) > 0:
+                miss_distances = jnp.linalg.norm(terminal_states[:, 0:2], axis=-1)
+                avg_miss = float(jnp.mean(miss_distances))
+                
+                impact_speeds = jnp.linalg.norm(terminal_states[:, 3:6], axis=-1)
+                avg_impact = float(jnp.mean(impact_speeds))
+            else:
+                avg_miss = 0.0
+                avg_impact = 0.0
+            
+            elapsed = time.time() - start_time
             
             float_reward = float(avg_reward)
             float_length = float(avg_ep_length)
             float_ploss = float(policy_loss)
             float_vloss = float(value_loss)
             
-            print(f"Update: {update:04d} | Reward: {float_reward:8.2f} | Ep Length: {float_length:5.1f} | P-Loss: {float_ploss:6.3f} | V-Loss: {float_vloss:6.3f} | Time: {elapsed:.1f}s")
+            print(f"Up: {update:04d} | R: {float_reward:8.1f} | Len: {float_length:5.1f} | Miss: {avg_miss:5.1f}m | Impact: {avg_impact:5.1f}m/s | V-Loss: {float_vloss:8.1f}")
             
             with open('training_log.csv', 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([update, float_reward, float_length, float_ploss, float_vloss, elapsed])
-    
+                writer.writerow([update, float_reward, float_length, avg_miss, avg_impact, float_ploss, float_vloss, elapsed])
+
     with open('model_weights.pkl', 'wb') as f:
         pickle.dump(train_state.params, f)
     print("Training complete. Model saved to model_weights.pkl.")

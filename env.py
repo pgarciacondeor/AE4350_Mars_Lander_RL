@@ -73,10 +73,15 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     
     # Continuous Rewards
 
-    target_pos = jnp.array([0.0, 0.0, 500.0])
-
-    # Distance 
-    distance_penalty = -0.002 * jnp.linalg.norm(pos - target_pos) 
+    # Distance
+    target_xy = jnp.array([0.0, 0.0])
+    xy_dist = jnp.linalg.norm(pos[0:2] - target_xy)
+    z_dist = jnp.abs(pos[2] - 500.0)
+    
+    xy_penalty = -0.01 * xy_dist
+    z_penalty = -0.002 * z_dist
+    
+    distance_penalty = xy_penalty + z_penalty
 
     # High velocity
     velocity_penalty = -0.005 * jnp.linalg.norm(vel)
