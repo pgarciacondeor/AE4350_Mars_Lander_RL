@@ -15,7 +15,7 @@ import agent
 # Hyperparameters
 NUM_ENVS = 1000             
 NUM_STEPS = 200             
-TOTAL_UPDATES = 1000         
+TOTAL_UPDATES = 2000         
 LEARNING_RATE = 3e-4
 GAMMA = 0.99                
 GAE_LAMBDA = 0.95           # Smoothing factor for advantage
@@ -56,11 +56,18 @@ def compute_gae(rewards, values, next_value, dones):
 # Training state initialization
 def create_train_state(rng, learning_rate):
     """Initializes the Actor-Critic network and Optax optimizer."""
+
     network = agent.ActorCritic()
-    
     dummy_obs = jnp.zeros((1, 14))
     params = network.init(rng, dummy_obs)['params']
-    tx = optax.adam(learning_rate)
+    
+    schedule = optax.linear_schedule(
+        init_value=learning_rate, 
+        end_value=0.0, 
+        transition_steps=TOTAL_UPDATES
+    )
+    tx = optax.adam(learning_rate=schedule)
+    
     return TrainState.create(apply_fn=network.apply, params=params, tx=tx)
 
 # Single PPO step
