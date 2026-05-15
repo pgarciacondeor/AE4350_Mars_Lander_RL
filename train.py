@@ -105,10 +105,6 @@ def main():
     with open('training_log.csv', 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m', 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Time'])
-    
-    if update % 100 == 0 and update > 0:
-        with open(f'model_weights_checkpoint_{update:04d}.pkl', 'wb') as backup_file:
-            pickle.dump(train_state.params, backup_file)
 
     for update in range(TOTAL_UPDATES):
         
@@ -221,6 +217,10 @@ def main():
             with open('training_log.csv', 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([update, float_reward, float_length, avg_miss, avg_impact, float_ploss, float_vloss, elapsed])
+        
+        if update % 100 == 0 and update > 0:
+            with open(f'model_weights_checkpoint_{update:04d}.pkl', 'wb') as backup_file:
+                pickle.dump(train_state.params, backup_file)
 
     with open('model_weights.pkl', 'wb') as f:
         pickle.dump(train_state.params, f)
