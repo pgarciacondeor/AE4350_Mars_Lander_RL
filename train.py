@@ -190,7 +190,7 @@ def main():
             float_ploss = float(policy_loss)
             float_vloss = float(value_loss)
             
-            print(f"Update: {update:03d} | Reward: {float_reward:8.2f} | Ep Length: {float_length:5.1f} | P-Loss: {float_ploss:6.3f} | V-Loss: {float_vloss:6.3f} | Time: {elapsed:.1f}s")
+            print(f"Update: {update:04d} | Reward: {float_reward:8.2f} | Ep Length: {float_length:5.1f} | P-Loss: {float_ploss:6.3f} | V-Loss: {float_vloss:6.3f} | Time: {elapsed:.1f}s")
             
             with open('training_log.csv', 'a', newline='') as f:
                 writer = csv.writer(f)

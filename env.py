@@ -76,10 +76,10 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     target_pos = jnp.array([0.0, 0.0, 500.0])
 
     # Distance 
-    distance_penalty = -0.05 * jnp.linalg.norm(pos - target_pos) 
+    distance_penalty = -0.002 * jnp.linalg.norm(pos - target_pos) 
 
     # High velocity
-    velocity_penalty = -0.05 * jnp.linalg.norm(vel)
+    velocity_penalty = -0.005 * jnp.linalg.norm(vel)
 
     # Tilting
     upright_penalty = -2.0 * (1.0 - q[0]) 
@@ -104,7 +104,9 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     crash = is_grounded & ~(safe_impact & upright_impact)
 
     xy_dist = jnp.linalg.norm(pos[0:2])
-    crash_shaped_penalty = -200.0 - (xy_dist * 2.0)
+    impact_speed = jnp.linalg.norm(vel)
+    
+    crash_shaped_penalty = -200.0 - (xy_dist * 2.0) - (impact_speed * 10.0)
 
     terminal_reward = jnp.where(successful_landing, 5000.0, 0.0)
     terminal_reward = jnp.where(crash, crash_shaped_penalty, terminal_reward)
