@@ -191,7 +191,7 @@ def main():
                 5.0, 5.0, 5.0,         # Angular velocity
                 2000.0                 # Mass
             ])
-            raw_states = batch_obs * scale_factors
+            raw_states = batch_states * scale_factors
             
             terminal_states = raw_states[batch_dones]
             
