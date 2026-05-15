@@ -7,6 +7,7 @@ from flax.training.train_state import TrainState
 import numpy as np
 import time
 import pickle
+import csv
 
 import env
 import agent
@@ -93,7 +94,11 @@ def main():
     
     print(f"Starting Training: {NUM_ENVS} parallel landers...")
     start_time = time.time()
-    
+
+    with open('training_log.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Policy_Loss', 'Value_Loss', 'Time'])
+
     for update in range(TOTAL_UPDATES):
         
         batch_states = []
@@ -169,7 +174,20 @@ def main():
         if update % 10 == 0:
             avg_reward = jnp.mean(jnp.sum(batch_rewards, axis=0))
             elapsed = time.time() - start_time
-            print(f"Update: {update:03d} | Avg Ep Reward: {avg_reward:8.2f} | Policy Loss: {policy_loss:6.3f} | Value Loss: {value_loss:6.3f} | Time: {elapsed:.1f}s")
+
+            total_dones = jnp.sum(batch_dones)
+            avg_ep_length = (NUM_ENVS * NUM_STEPS) / jnp.maximum(1.0, total_dones)
+            
+            float_reward = float(avg_reward)
+            float_length = float(avg_ep_length)
+            float_ploss = float(policy_loss)
+            float_vloss = float(value_loss)
+            
+            print(f"Update: {update:03d} | Reward: {float_reward:8.2f} | Ep Length: {float_length:5.1f} | P-Loss: {float_ploss:6.3f} | V-Loss: {float_vloss:6.3f} | Time: {elapsed:.1f}s")
+            
+            with open('training_log.csv', 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([update, float_reward, float_length, float_ploss, float_vloss, elapsed])
     
     with open('model_weights.pkl', 'wb') as f:
         pickle.dump(train_state.params, f)

@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import pickle
 import numpy as np
+import csv
 
 import env
 import agent
@@ -144,8 +145,59 @@ def animate_flight(history, filename='lander_animation.gif'):
     ani.save(filename, writer='pillow', fps=20)
     print(f"Animation saved to {filename}")
 
+def generate_training_plots():
+    updates = []
+    rewards = []
+    lengths = []
+    p_losses = []
+    v_losses = []
+
+    try:
+        with open('training_log.csv', 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                updates.append(int(row['Update']))
+                rewards.append(float(row['Avg_Reward']))
+                lengths.append(float(row['Avg_Ep_Length']))
+                p_losses.append(float(row['Policy_Loss']))
+                v_losses.append(float(row['Value_Loss']))
+    except FileNotFoundError:
+        print("Error: 'training_log.csv' not found. Run train.py first!")
+        return
+
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+
+    axs[0, 0].plot(updates, rewards, color='blue', linewidth=2)
+    axs[0, 0].set_title('Episode Return (Average Reward)')
+    axs[0, 0].set_xlabel('Updates')
+    axs[0, 0].set_ylabel('Reward')
+    axs[0, 0].grid(True)
+
+    axs[0, 1].plot(updates, lengths, color='green', linewidth=2)
+    axs[0, 1].set_title('Average Episode Length')
+    axs[0, 1].set_xlabel('Updates')
+    axs[0, 1].set_ylabel('Steps Survived')
+    axs[0, 1].grid(True)
+
+    axs[1, 0].plot(updates, p_losses, color='orange', linewidth=2)
+    axs[1, 0].set_title('Policy Loss (Actor)')
+    axs[1, 0].set_xlabel('Updates')
+    axs[1, 0].set_ylabel('Loss')
+    axs[1, 0].grid(True)
+
+    axs[1, 1].plot(updates, v_losses, color='red', linewidth=2)
+    axs[1, 1].set_title('Value Loss (Critic)')
+    axs[1, 1].set_xlabel('Updates')
+    axs[1, 1].set_ylabel('Loss')
+    axs[1, 1].set_yscale('log') 
+    axs[1, 1].grid(True)
+
+    plt.tight_layout()
+    plt.savefig('PPO_Training_Curves.png', dpi=300)
+
 if __name__ == "__main__":
     params = load_model()
     data = run_flight(params)
     plot_results(data)
     animate_flight(data)
+    generate_training_plots()
