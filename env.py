@@ -18,33 +18,35 @@ class EnvState(NamedTuple):
 def get_terrain_elevation(x, y):
     """
     Creates a procedural 3D terrain mimicking the foothills of Mount Sharp inside Gale Crater.
-    The center (0,0) is a mountain peak, surrounded by lower crater features.
+    The center (0,0) is a mountain peak with a flat pad, surrounded by lower crater features.
     """
-    # A central mountain peak of 500m
     mountain = 500.0 * jnp.exp(-(x**2 + y**2) / 10000.0) 
-    # Wavy surface topography 
     ridges = 20.0 * jnp.sin(x / 20.0) * jnp.cos(y / 20.0)
-    return mountain + ridges
+    raw_terrain = mountain + ridges
+    
+    is_pad = (x**2 + y**2) <= 225.0
+    
+    return jnp.where(is_pad, 500.0, raw_terrain)
 
 @jax.jit
 def reset(key: jax.random.PRNGKey) -> EnvState:
     """Initializes the Mars Lander at the start of the powered descent."""
-    keys = jax.random.split(key, 4)
+    keys = jax.random.split(key, 5)
     
-    # Randomize initial altitude and lateral drift
-    x_y = jax.random.uniform(keys[0], shape=(2,), minval=-50.0, maxval=50.0)
-    z = jax.random.uniform(keys[1], shape=(1,), minval=800.0, maxval=1000.0)
+    magnitude_xy = jax.random.uniform(keys[0], shape=(2,), minval=200.0, maxval=400.0)
+    
+    signs = jax.random.choice(keys[1], jnp.array([-1.0, 1.0]), shape=(2,))
+    x_y = magnitude_xy * signs
+    
+    z = jax.random.uniform(keys[2], shape=(1,), minval=2300.0, maxval=2500.0)
     pos = jnp.concatenate([x_y, z])
     
-    # Randomize initial downward velocity
-    vx_vy = jax.random.uniform(keys[2], shape=(2,), minval=-5.0, maxval=5.0)
-    vz = jax.random.uniform(keys[3], shape=(1,), minval=-100.0, maxval=-80.0)
+    vx_vy = jax.random.uniform(keys[3], shape=(2,), minval=-15.0, maxval=15.0)
+    vz = jax.random.uniform(keys[4], shape=(1,), minval=-90.0, maxval=-70.0)
     vel = jnp.concatenate([vx_vy, vz])
     
-    # Upright orientation and zero angular velocity
     q = jnp.array([1.0, 0.0, 0.0, 0.0])
     omega = jnp.array([0.0, 0.0, 0.0])
-    
     mass = jnp.array([INITIAL_MASS])
     
     physics_state = jnp.concatenate([pos, vel, q, omega, mass])
@@ -71,19 +73,21 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     
     # Continuous Rewards
 
-    target_pos = jnp.array([0.0, 0.0, 520.0])
-    distance_penalty = -0.01 * jnp.linalg.norm(pos - target_pos)
-    
-    # High velocities
+    target_pos = jnp.array([0.0, 0.0, 500.0])
+
+    # Distance 
+    distance_penalty = -0.05 * jnp.linalg.norm(pos - target_pos) 
+
+    # High velocity
     velocity_penalty = -0.05 * jnp.linalg.norm(vel)
-    
+
     # Tilting
-    upright_penalty = -1.0 * (1.0 - q[0])
-    
+    upright_penalty = -2.0 * (1.0 - q[0]) 
+
     # Spinning
     spin_penalty = -0.1 * jnp.linalg.norm(omega)
-    
-    # Fuel efficiency
+
+    # Fuel efficiency 
     throttle_penalty = -0.01 * jnp.sum(action)
     
     step_reward = distance_penalty + velocity_penalty + upright_penalty + spin_penalty + throttle_penalty
@@ -99,8 +103,11 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     successful_landing = is_grounded & safe_impact & upright_impact
     crash = is_grounded & ~(safe_impact & upright_impact)
 
-    terminal_reward = jnp.where(successful_landing, 1000.0, 0.0)
-    terminal_reward = jnp.where(crash, -1000.0, terminal_reward)
+    xy_dist = jnp.linalg.norm(pos[0:2])
+    crash_shaped_penalty = -200.0 - (xy_dist * 2.0)
+
+    terminal_reward = jnp.where(successful_landing, 5000.0, 0.0)
+    terminal_reward = jnp.where(crash, crash_shaped_penalty, terminal_reward)
     
     # Out of fuel penalty
     fuel_empty = mass <= DRY_MASS
