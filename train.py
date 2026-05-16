@@ -17,7 +17,7 @@ NUM_ENVS = 1000
 NUM_STEPS = 200             
 TOTAL_UPDATES = 2000         
 LEARNING_RATE = 3e-4
-GAMMA = 0.99                
+GAMMA = 0.999                
 GAE_LAMBDA = 0.95           # Smoothing factor for advantage
 CLIP_EPSILON = 0.2          # PPO clipping parameter
 EPOCHS = 4                  # How many times to reuse rollout data per update
@@ -54,17 +54,25 @@ def compute_gae(rewards, values, next_value, dones):
     return advantages, returns
 
 # Training state initialization
-def create_train_state(rng, learning_rate):
+def create_train_state(rng, learning_rate, resume_update=0):
     """Initializes the Actor-Critic network and Optax optimizer."""
-
     network = agent.ActorCritic()
-    dummy_obs = jnp.zeros((1, 14))
-    params = network.init(rng, dummy_obs)['params']
+    
+    if resume_update > 0:
+        print(f"Loading checkpoint from Update {resume_update}...")
+        with open(f'model_weights_checkpoint_{resume_update:04d}.pkl', 'rb') as f:
+            params = pickle.load(f)
+    else:
+        dummy_obs = jnp.zeros((1, 14))
+        params = network.init(rng, dummy_obs)['params']
+    
+    current_lr = learning_rate * (1.0 - (resume_update / TOTAL_UPDATES))
+    remaining_steps = TOTAL_UPDATES - resume_update
     
     schedule = optax.linear_schedule(
-        init_value=learning_rate, 
+        init_value=current_lr, 
         end_value=0.0, 
-        transition_steps=TOTAL_UPDATES
+        transition_steps=remaining_steps
     )
     tx = optax.adam(learning_rate=schedule)
     
@@ -90,6 +98,9 @@ def ppo_update(train_state, states, actions, old_log_probs, advantages, returns)
 
 # Training loop
 def main():
+
+    RESUME_UPDATE = 0
+
     rng = jax.random.PRNGKey(42)
     rng, net_rng = jax.random.split(rng)
     
@@ -102,11 +113,14 @@ def main():
     print(f"Starting Training: {NUM_ENVS} parallel landers...")
     start_time = time.time()
 
-    with open('training_log.csv', 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m', 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Time'])
+    if RESUME_UPDATE == 0:
+        with open('training_log.csv', 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m', 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Time'])
+    else:
+        print(f"Resuming logging from Update {RESUME_UPDATE}...")
 
-    for update in range(TOTAL_UPDATES):
+    for update in range(RESUME_UPDATE, TOTAL_UPDATES):
         
         batch_states = []
         batch_actions = []
@@ -173,10 +187,35 @@ def main():
         flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
         
         # Optimize network
+        num_transitions = NUM_ENVS * NUM_STEPS
+        num_minibatches = num_transitions // BATCH_SIZE
+
         for epoch in range(EPOCHS):
-            train_state, (policy_loss, value_loss, entropy_loss) = ppo_update(
-                train_state, flat_states, flat_actions, flat_log_probs, flat_advantages, flat_returns
-            )
+            
+            rng, perm_rng = jax.random.split(rng)
+            permutation = jax.random.permutation(perm_rng, num_transitions)
+            
+            shuffled_states = flat_states[permutation]
+            shuffled_actions = flat_actions[permutation]
+            shuffled_log_probs = flat_log_probs[permutation]
+            shuffled_advantages = flat_advantages[permutation]
+            shuffled_returns = flat_returns[permutation]
+            
+            batch_states_reshaped = shuffled_states.reshape((num_minibatches, BATCH_SIZE, -1))
+            batch_actions_reshaped = shuffled_actions.reshape((num_minibatches, BATCH_SIZE, -1))
+            batch_log_probs_reshaped = shuffled_log_probs.reshape((num_minibatches, BATCH_SIZE))
+            batch_advantages_reshaped = shuffled_advantages.reshape((num_minibatches, BATCH_SIZE))
+            batch_returns_reshaped = shuffled_returns.reshape((num_minibatches, BATCH_SIZE))
+            
+            for b in range(num_minibatches):
+                train_state, (policy_loss, value_loss, entropy_loss) = ppo_update(
+                    train_state, 
+                    batch_states_reshaped[b], 
+                    batch_actions_reshaped[b], 
+                    batch_log_probs_reshaped[b], 
+                    batch_advantages_reshaped[b], 
+                    batch_returns_reshaped[b]
+                )
 
         if update % 10 == 0:
             avg_reward = jnp.mean(jnp.sum(batch_rewards, axis=0))
@@ -184,16 +223,7 @@ def main():
             total_dones = jnp.sum(batch_dones)
             avg_ep_length = (NUM_ENVS * NUM_STEPS) / jnp.maximum(1.0, total_dones) 
             
-            scale_factors = jnp.array([
-                100.0, 100.0, 1000.0,  # X, Y, Z
-                10.0, 10.0, 100.0,     # Vx, Vy, Vz
-                1.0, 1.0, 1.0, 1.0,    # Quaternions
-                5.0, 5.0, 5.0,         # Angular velocity
-                2000.0                 # Mass
-            ])
-            raw_states = batch_states * scale_factors
-            
-            terminal_states = raw_states[batch_dones]
+            terminal_states = batch_states[batch_dones]
             
             if len(terminal_states) > 0:
                 miss_distances = jnp.linalg.norm(terminal_states[:, 0:2], axis=-1)
