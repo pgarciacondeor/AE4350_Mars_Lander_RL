@@ -61,7 +61,7 @@ def create_train_state(rng, learning_rate, resume_update=0):
     
     if resume_update > 0:
         print(f"Loading checkpoint from Update {resume_update}...")
-        with open(f'model_weights_checkpoint_{resume_update:04d}.pkl', 'rb') as f:
+        with open(f'weights/model_weights_checkpoint_{resume_update:04d}.pkl', 'rb') as f:
             params = pickle.load(f)
     else:
         dummy_obs = jnp.zeros((1, 14))
@@ -252,12 +252,12 @@ def main():
                 writer.writerow([update, float_reward, float_length, avg_miss, avg_impact, float_ploss, float_vloss, elapsed])
         
         if update % 100 == 0 and update > 0:
-            with open(f'model_weights_checkpoint_{update:04d}.pkl', 'wb') as backup_file:
+            with open(f'weights/model_weights_checkpoint_{update:04d}.pkl', 'wb') as backup_file:
                 pickle.dump(train_state.params, backup_file)
 
-    with open('model_weights.pkl', 'wb') as f:
+    with open('weights/model_weights.pkl', 'wb') as f:
         pickle.dump(train_state.params, f)
-    print("Training complete. Model saved to model_weights.pkl.")
+    print("Training complete. Model saved to weights/model_weights.pkl.")
 
 if __name__ == "__main__":
     main()
