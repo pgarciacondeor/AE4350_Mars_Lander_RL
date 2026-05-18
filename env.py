@@ -6,8 +6,8 @@ from physics import euler_step, INITIAL_MASS, DRY_MASS
 # Environment
 DT = 0.05                  # Time step
 MAX_STEPS = 1000           # Maximum duration 50 s
-SAFE_Z_VELOCITY = -2.5     # m/s
-SAFE_XY_VELOCITY = 1.0     # m/s
+SAFE_Z_VELOCITY = -5.0     # m/s
+SAFE_XY_VELOCITY = 2.0     # m/s
 
 class EnvState(NamedTuple):
     physics_state: jnp.ndarray
@@ -29,15 +29,28 @@ def get_terrain_elevation(x, y):
     return jnp.where(is_pad, 500.0, raw_terrain)
 
 @jax.jit
-def reset(key: jax.random.PRNGKey) -> EnvState:
-    """Initializes the Mars Lander at the start of the powered descent."""
-    keys = jax.random.split(key, 5)
+def reset(key: jax.random.PRNGKey, max_stage: jnp.int32) -> EnvState:
+    """Initializes the Mars Lander using Multi-Task Curriculum Learning."""
+
+    keys = jax.random.split(key, 6)
     
-    z = jax.random.uniform(keys[2], shape=(1,), minval=550.0, maxval=2500.0)
+    stage = jax.random.randint(keys[5], shape=(), minval=0, maxval=max_stage + 1)
     
-    max_radius = ((z[0] - 500.0) / 2000.0) * 400.0 
+    z_min_bounds = jnp.array([550.0, 1000.0, 1500.0, 2000.0])
+    z_max_bounds = jnp.array([600.0, 1200.0, 2000.0, 2500.0])
+    xy_bounds    = jnp.array([10.0, 100.0, 250.0, 400.0])
+    vz_min_bounds= jnp.array([-5.0, -30.0, -60.0, -90.0])
+    vz_max_bounds= jnp.array([0.0, -10.0, -30.0, -70.0])
     
-    magnitude_xy = jax.random.uniform(keys[0], shape=(2,), minval=0.0, maxval=max_radius + 5.0)
+    z_min = z_min_bounds[stage]
+    z_max = z_max_bounds[stage]
+    max_radius = xy_bounds[stage]
+    vz_min = vz_min_bounds[stage]
+    vz_max = vz_max_bounds[stage]
+    
+    z = jax.random.uniform(keys[2], shape=(1,), minval=z_min, maxval=z_max)
+    
+    magnitude_xy = jax.random.uniform(keys[0], shape=(2,), minval=0.0, maxval=max_radius)
     signs = jax.random.choice(keys[1], jnp.array([-1.0, 1.0]), shape=(2,))
     x_y = magnitude_xy * signs
     pos = jnp.concatenate([x_y, z])
@@ -45,13 +58,12 @@ def reset(key: jax.random.PRNGKey) -> EnvState:
     target_xy = jnp.array([0.0, 0.0])
     direction_xy = target_xy - x_y
     dist_xy = jnp.linalg.norm(direction_xy)
-    
     unit_direction = jnp.where(dist_xy > 0, direction_xy / dist_xy, jnp.zeros(2))
     
-    approach_speed = jax.random.uniform(keys[3], shape=(1,), minval=10.0, maxval=30.0)
+    approach_speed = jnp.where(stage == 0, 0.0, jax.random.uniform(keys[3], shape=(1,), minval=10.0, maxval=30.0))
     vx_vy = unit_direction * approach_speed
     
-    vz = jax.random.uniform(keys[4], shape=(1,), minval=-90.0, maxval=-70.0)
+    vz = jax.random.uniform(keys[4], shape=(1,), minval=vz_min, maxval=vz_max)
     vel = jnp.concatenate([vx_vy, vz])
     
     q = jnp.array([1.0, 0.0, 0.0, 0.0])
@@ -60,11 +72,7 @@ def reset(key: jax.random.PRNGKey) -> EnvState:
     
     physics_state = jnp.concatenate([pos, vel, q, omega, mass])
     
-    return EnvState(
-        physics_state=physics_state,
-        time_step=jnp.int32(0),
-        done=jnp.bool_(False)
-    )
+    return EnvState(physics_state=physics_state, time_step=jnp.int32(0), done=jnp.bool_(False))
 
 # Reward function
 @jax.jit

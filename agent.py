@@ -70,13 +70,15 @@ def calc_log_prob(action, mean, log_std):
 def ppo_loss_fn(params, apply_fn, states, actions, old_log_probs, advantages, returns, clip_ratio=0.2, vf_coef=0.5, ent_coef=0.01):
     """Calculates the PPO clipped surrogate loss, value loss, and entropy bonus."""
     
+    ent_coef = 0.01
+
     # Forward pass
     mean, log_std, values = apply_fn({'params': params}, states)
     values = jnp.squeeze(values)
     
     new_log_probs = calc_log_prob(actions, mean, log_std)
     std = jnp.exp(log_std)
-    entropy = jnp.sum(log_std + 0.5 + 0.5 * jnp.log(2 * jnp.pi), axis=-1)
+    entropy = log_std + 0.5 * jnp.log(2 * jnp.pi * jnp.e)
     
     # Policy loss
     ratio = jnp.exp(new_log_probs - old_log_probs)

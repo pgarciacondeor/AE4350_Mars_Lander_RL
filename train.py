@@ -17,14 +17,15 @@ NUM_ENVS = 1000
 NUM_STEPS = 200             
 TOTAL_UPDATES = 2000         
 LEARNING_RATE = 3e-4
-GAMMA = 0.999                
+GAMMA = 0.995                
 GAE_LAMBDA = 0.95           # Smoothing factor for advantage
 CLIP_EPSILON = 0.2          # PPO clipping parameter
 EPOCHS = 4                  # How many times to reuse rollout data per update
-BATCH_SIZE = 256            
+BATCH_SIZE = 4096     
+ENTROPY_COEF = 0.01       
 
 # Jax vectorizing
-v_reset = jax.vmap(env.reset)
+v_reset = jax.vmap(env.reset, in_axes=(0, None))
 v_step = jax.vmap(env.step, in_axes=(0, 0))
 v_sample_action = jax.vmap(agent.sample_action, in_axes=(0, None, 0))
 v_calc_log_prob = jax.vmap(agent.calc_log_prob, in_axes=(0, 0, None))
@@ -100,15 +101,16 @@ def ppo_update(train_state, states, actions, old_log_probs, advantages, returns)
 def main():
 
     RESUME_UPDATE = 0
+    STAGE = 0
 
     rng = jax.random.PRNGKey(42)
     rng, net_rng = jax.random.split(rng)
     
-    train_state = create_train_state(net_rng, LEARNING_RATE)
+    train_state = create_train_state(net_rng, LEARNING_RATE, RESUME_UPDATE)
     
     rng, reset_rng = jax.random.split(rng)
     reset_rngs = jax.random.split(reset_rng, NUM_ENVS)
-    env_states = v_reset(reset_rngs)
+    env_states = v_reset(reset_rngs, STAGE)
     
     print(f"Starting Training: {NUM_ENVS} parallel landers...")
     start_time = time.time()
@@ -154,7 +156,7 @@ def main():
             
             # Advance
             rng, reset_rng = jax.random.split(rng)
-            fresh_env_states = v_reset(jax.random.split(reset_rng, NUM_ENVS))
+            fresh_env_states = v_reset(jax.random.split(reset_rng, NUM_ENVS), STAGE)
             
             env_states = jax.tree_util.tree_map(
                 lambda next_s, fresh_s: jnp.where(
@@ -189,11 +191,12 @@ def main():
         # Optimize network
         num_transitions = NUM_ENVS * NUM_STEPS
         num_minibatches = num_transitions // BATCH_SIZE
+        valid_transitions = num_minibatches * BATCH_SIZE
 
         for epoch in range(EPOCHS):
             
             rng, perm_rng = jax.random.split(rng)
-            permutation = jax.random.permutation(perm_rng, num_transitions)
+            permutation = jax.random.permutation(perm_rng, num_transitions)[:valid_transitions]
             
             shuffled_states = flat_states[permutation]
             shuffled_actions = flat_actions[permutation]
