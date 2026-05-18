@@ -10,7 +10,7 @@ import env
 import agent
 
 # Load trained model
-def load_model(filename='model_weights.pkl'):
+def load_model(filename='weights/model_weights.pkl'):
     with open(filename, 'rb') as f:
         params = pickle.load(f)
     return params
@@ -87,11 +87,11 @@ def plot_results(history):
     ax4.grid(True)
 
     plt.tight_layout()
-    plt.savefig('MSL_Flight_Analysis.png', dpi=300)
-    print("Dashboard saved to 'MSL_Flight_Analysis.png'.")
+    plt.savefig('figures/MSL_Flight_Analysis.png', dpi=300)
+    print("Dashboard saved to 'figures/MSL_Flight_Analysis.png'.")
 
 # 3D animation
-def animate_flight(history, filename='lander_animation.gif'):
+def animate_flight(history, filename='figures/lander_animation.gif'):
 
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
@@ -204,7 +204,7 @@ def generate_training_plots():
     axs[1, 2].grid(True)
 
     plt.tight_layout()
-    plt.savefig('PPO_Training_Dashboard.png', dpi=300)
+    plt.savefig('figures/PPO_Training_Dashboard.png', dpi=300)
 
 if __name__ == "__main__":
     params = load_model()
