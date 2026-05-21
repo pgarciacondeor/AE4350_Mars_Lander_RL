@@ -14,7 +14,7 @@ import agent
 
 # Hyperparameters
 NUM_ENVS = 1000             
-NUM_STEPS = 200             
+NUM_STEPS = 500             
 TOTAL_UPDATES = 2000         
 LEARNING_RATE = 3e-4
 GAMMA = 0.995                
@@ -22,7 +22,7 @@ GAE_LAMBDA = 0.95           # Smoothing factor for advantage
 CLIP_EPSILON = 0.2          # PPO clipping parameter
 EPOCHS = 4                  # How many times to reuse rollout data per update
 BATCH_SIZE = 4096     
-ENTROPY_COEF = 0.01       
+ENTROPY_COEF = 0.02     
 
 # Jax vectorizing
 v_reset = jax.vmap(env.reset, in_axes=(0, None))
@@ -118,7 +118,7 @@ def main():
     if RESUME_UPDATE == 0:
         with open('training_log.csv', 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m', 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Time'])
+            writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m', 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Stage', 'Success_Rate', 'Time'])
     else:
         print(f"Resuming logging from Update {RESUME_UPDATE}...")
 
@@ -221,7 +221,51 @@ def main():
                 )
 
         if update % 10 == 0:
-            avg_reward = jnp.mean(jnp.sum(batch_rewards, axis=0))
+
+            if update == 0:
+                print(f"  DEBUG: batch_rewards min={float(jnp.min(batch_rewards)):.3f} max={float(jnp.max(batch_rewards)):.3f} mean={float(jnp.mean(batch_rewards)):.3f}")
+                print(f"  DEBUG: single ep reward sum = {float(jnp.sum(batch_rewards[:, 0])):.3f}")
+                print(f"  DEBUG: steps until first done env 0 = {int(jnp.argmax(batch_dones[:, 0]))}")
+
+                grad_fn = jax.value_and_grad(lambda p: agent.ppo_loss_fn(
+                    p, train_state.apply_fn, batch_states_reshaped[0],
+                    batch_actions_reshaped[0], batch_log_probs_reshaped[0],
+                    batch_advantages_reshaped[0], batch_returns_reshaped[0]
+                )[0], has_aux=False)
+                _, grads = grad_fn(train_state.params)
+                grad_norm = sum(jnp.sum(g**2) for g in jax.tree_util.tree_leaves(grads)) ** 0.5
+                print(f"  DEBUG: grad norm = {float(grad_norm):.6f}")
+
+                print(f"  DEBUG: advantages mean={float(flat_advantages.mean()):.4f} std={float(flat_advantages.std()):.4f}")
+                print(f"  DEBUG: returns mean={float(flat_returns.mean()):.4f} std={float(flat_returns.std()):.4f}")
+
+            terminal_mask = batch_dones  
+            terminal_states_flat = batch_states[terminal_mask] 
+
+            if len(terminal_states_flat) > 0:
+                term_vel = terminal_states_flat[:, 3:6]
+                term_pos = terminal_states_flat[:, 0:3]
+                term_q   = terminal_states_flat[:, 6:10]
+                
+                vz_ok      = term_vel[:, 2] >= env.SAFE_Z_VELOCITY          
+                vxy_ok     = jnp.linalg.norm(term_vel[:, 0:2], axis=1) <= env.SAFE_XY_VELOCITY
+                upright_ok = term_q[:, 0] > 0.95
+                on_pad_ok  = jnp.linalg.norm(term_pos[:, 0:2], axis=1) < 100.0 
+                
+                successes = jnp.sum(vz_ok & vxy_ok & upright_ok & on_pad_ok)
+                success_rate = float(successes) / max(1, len(terminal_states_flat))
+            else:
+                successes = 0
+                success_rate = 0.0
+
+            ADVANCE_THRESHOLD = 0.50  
+            if success_rate >= ADVANCE_THRESHOLD and STAGE < 3:
+                STAGE = min(STAGE + 1, 3)
+                print(f"  *** CURRICULUM ADVANCE → Stage {STAGE} (success rate: {success_rate:.1%}) ***")
+
+            not_done_mask = jnp.concatenate([jnp.ones((1, NUM_ENVS), dtype=jnp.float32), jnp.cumprod(1.0 - batch_dones[:-1].astype(jnp.float32), axis=0)], axis=0)
+            masked_rewards = batch_rewards * not_done_mask
+            avg_reward = float(jnp.mean(jnp.sum(masked_rewards, axis=0)))
             
             total_dones = jnp.sum(batch_dones)
             avg_ep_length = (NUM_ENVS * NUM_STEPS) / jnp.maximum(1.0, total_dones) 
@@ -245,12 +289,12 @@ def main():
             float_ploss = float(policy_loss)
             float_vloss = float(value_loss)
             
-            print(f"Up: {update:04d} | R: {float_reward:8.1f} | Len: {float_length:5.1f} | Miss: {avg_miss:5.1f}m | Impact: {avg_impact:5.1f}m/s | V-Loss: {float_vloss:8.1f}")
-            
+            print(f"Up: {update:04d} | " f"Stage: {STAGE} | " f"R: {float_reward:7.1f} | " f"Len: {float_length:6.1f} | "f"Success: {success_rate:5.1%} ({int(successes):4d}/{max(1,len(terminal_states_flat)):4d}) | " f"Miss: {avg_miss:6.1f}m | " f"Impact: {avg_impact:5.1f}m/s | " f"V-Loss: {float_vloss:6.3f} | " f"P-Loss: {float_ploss:7.4f}")
+
             with open('training_log.csv', 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([update, float_reward, float_length, avg_miss, avg_impact, float_ploss, float_vloss, elapsed])
-        
+                writer.writerow([update, float_reward, float_length, avg_miss, avg_impact, float_ploss, float_vloss, STAGE, success_rate, elapsed])
+                
         if update % 100 == 0 and update > 0:
             with open(f'weights/model_weights_checkpoint_{update:04d}.pkl', 'wb') as backup_file:
                 pickle.dump(train_state.params, backup_file)

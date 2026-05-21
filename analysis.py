@@ -20,7 +20,7 @@ def run_flight(params):
     network = agent.ActorCritic()
     rng = jax.random.PRNGKey(42) 
     
-    env_state = env.reset(rng)
+    env_state = env.reset(rng, jnp.int32(0))
     
     history = {
         'x': [], 'y': [], 'z': [],
@@ -141,7 +141,7 @@ def animate_flight(history, filename='figures/lander_animation.gif'):
 def generate_training_plots():
     updates, rewards, lengths = [], [], []
     misses, impacts = [], []
-    p_losses, v_losses = [], []
+    p_losses, v_losses, stages = [], [], []  
 
     try:
         with open('training_log.csv', 'r') as f:
@@ -151,12 +151,12 @@ def generate_training_plots():
                 rewards.append(float(row['Avg_Reward']))
                 lengths.append(float(row['Avg_Ep_Length']))
                 
-                # Fetch our new metrics!
                 misses.append(float(row.get('Miss_Dist_m', 0.0)))
                 impacts.append(float(row.get('Impact_Speed_ms', 0.0)))
                 
                 p_losses.append(float(row['Policy_Loss']))
                 v_losses.append(float(row['Value_Loss']))
+                stages.append(int(row.get('Stage', 0))) 
     except FileNotFoundError:
         print("Error: 'training_log.csv' not found. Run train.py first!")
         return
@@ -197,10 +197,11 @@ def generate_training_plots():
     axs[1, 1].legend()
     axs[1, 1].grid(True)
 
-    axs[1, 2].plot(updates, p_losses, color='gray', linewidth=2)
-    axs[1, 2].set_title('Policy Loss (Actor)')
+    axs[1, 2].step(updates, stages, color='teal', linewidth=2, where='post')
+    axs[1, 2].set_title('Curriculum Stage Progression')
     axs[1, 2].set_xlabel('Updates')
-    axs[1, 2].set_ylabel('Loss')
+    axs[1, 2].set_ylabel('Stage Level')
+    axs[1, 2].set_yticks([0, 1, 2, 3])
     axs[1, 2].grid(True)
 
     plt.tight_layout()

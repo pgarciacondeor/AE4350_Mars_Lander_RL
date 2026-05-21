@@ -40,12 +40,11 @@ class ActorCritic(nn.Module):
         actor_hidden = nn.Dense(128)(x)
         actor_hidden = nn.relu(actor_hidden)
         
-        # Mean of the action distribution
-        mean = nn.Dense(self.action_dim)(actor_hidden)
-        mean = nn.sigmoid(mean)
+        raw_mean = nn.Dense(self.action_dim)(actor_hidden)
         
-        # Log standard deviation
-        log_std = self.param('log_std', nn.initializers.zeros, (self.action_dim,))
+        mean = 0.5 * (nn.tanh(raw_mean) + 1.0)
+        
+        log_std = self.param('log_std', nn.initializers.constant(-0.5), (self.action_dim,))
         
         return mean, log_std, value
 
@@ -69,8 +68,6 @@ def calc_log_prob(action, mean, log_std):
 # Proximal Policy Optimization (PPO) loss function
 def ppo_loss_fn(params, apply_fn, states, actions, old_log_probs, advantages, returns, clip_ratio=0.2, vf_coef=0.5, ent_coef=0.01):
     """Calculates the PPO clipped surrogate loss, value loss, and entropy bonus."""
-    
-    ent_coef = 0.01
 
     # Forward pass
     mean, log_std, values = apply_fn({'params': params}, states)
@@ -78,7 +75,10 @@ def ppo_loss_fn(params, apply_fn, states, actions, old_log_probs, advantages, re
     
     new_log_probs = calc_log_prob(actions, mean, log_std)
     std = jnp.exp(log_std)
-    entropy = log_std + 0.5 * jnp.log(2 * jnp.pi * jnp.e)
+    
+    # Entropy loss
+    entropy = jnp.sum(log_std + 0.5 * jnp.log(2 * jnp.pi * jnp.e), axis=-1)
+    entropy_loss = -jnp.mean(entropy)
     
     # Policy loss
     ratio = jnp.exp(new_log_probs - old_log_probs)
@@ -88,9 +88,6 @@ def ppo_loss_fn(params, apply_fn, states, actions, old_log_probs, advantages, re
     
     # Value loss
     value_loss = jnp.mean((returns - values) ** 2)
-    
-    # Entropy bonus
-    entropy_loss = -jnp.mean(entropy)
 
     total_loss = policy_loss + vf_coef * value_loss + ent_coef * entropy_loss
     

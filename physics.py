@@ -14,7 +14,7 @@ CD = 1.05                                # Drag coefficient
 AREA = 8.4                              # m^2
 
 # Propulsion System
-T_MAX = 3300.0                          # N (Max thrust per engine)
+T_MAX = 2600                          # N (Max thrust per engine)
 ISP = 225.0                             # s
 
 # Lander Inertia - rectangular box model

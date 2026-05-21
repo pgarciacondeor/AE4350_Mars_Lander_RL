@@ -24,7 +24,7 @@ def get_terrain_elevation(x, y):
     ridges = 20.0 * jnp.sin(x / 20.0) * jnp.cos(y / 20.0)
     raw_terrain = mountain + ridges
     
-    is_pad = (x**2 + y**2) <= 225.0
+    is_pad = (x**2 + y**2) <= 10000.0
     
     return jnp.where(is_pad, 500.0, raw_terrain)
 
@@ -36,11 +36,11 @@ def reset(key: jax.random.PRNGKey, max_stage: jnp.int32) -> EnvState:
     
     stage = jax.random.randint(keys[5], shape=(), minval=0, maxval=max_stage + 1)
     
-    z_min_bounds = jnp.array([550.0, 1000.0, 1500.0, 2000.0])
-    z_max_bounds = jnp.array([600.0, 1200.0, 2000.0, 2500.0])
-    xy_bounds    = jnp.array([10.0, 100.0, 250.0, 400.0])
-    vz_min_bounds= jnp.array([-5.0, -30.0, -60.0, -90.0])
-    vz_max_bounds= jnp.array([0.0, -10.0, -30.0, -70.0])
+    z_min_bounds = jnp.array([520.0, 800.0,  1500.0, 2000.0])
+    z_max_bounds = jnp.array([560.0, 1200.0, 2000.0, 2500.0])
+    vz_min_bounds= jnp.array([-8.0,  -20.0,  -60.0,  -90.0])
+    vz_max_bounds= jnp.array([-3.0,  -5.0,   -30.0,  -70.0])
+    xy_bounds    = jnp.array([3.0,   100.0,  250.0,   400.0])
     
     z_min = z_min_bounds[stage]
     z_max = z_max_bounds[stage]
@@ -87,47 +87,63 @@ def calculate_reward(state: jnp.ndarray, action: jnp.ndarray, done: bool):
     z = pos[2]
     vz = vel[2]
     
-    # Continuous Rewards
-    target_xy = jnp.array([0.0, 0.0])
-    xy_dist = jnp.linalg.norm(pos[0:2] - target_xy)
-    z_dist = jnp.abs(pos[2] - 500.0)
-    
-    xy_penalty = -0.01 * xy_dist
-    z_penalty = -0.002 * z_dist
-    distance_penalty = xy_penalty + z_penalty
+   
+    target_pad = jnp.array([0.0, 0.0, 500.0])
+    distance_to_pad = jnp.linalg.norm(pos - target_pad)
+    distance_penalty = -0.001 * distance_to_pad
 
-    velocity_penalty = -0.05 * jnp.linalg.norm(vel)
-    upright_penalty = -2.0 * (1.0 - q[0]) 
-    spin_penalty = -0.1 * jnp.linalg.norm(omega)
-    throttle_penalty = -0.01 * jnp.sum(action)
-    
-    step_reward = distance_penalty + velocity_penalty + upright_penalty + spin_penalty + throttle_penalty
-    
-    # Terminal Rewards
-    ground_z = get_terrain_elevation(pos[0], pos[1])
+    time_penalty = -0.02                                        
+
+    to_pad      = target_pad - pos
+    to_pad_norm = to_pad / (jnp.linalg.norm(to_pad) + 1e-6)
+    vel_alignment  = jnp.dot(vel, to_pad_norm)
+    alignment_bonus = 0.1 * jnp.clip(vel_alignment, -5.0, 5.0) 
+
+    velocity_penalty  = -0.005 * jnp.linalg.norm(vel)
+    upright_penalty   = -0.5  * (1.0 - q[0])
+    spin_penalty      = -0.02  * jnp.linalg.norm(omega)
+    throttle_penalty  = -0.005 * jnp.sum(action)
+
+    altitude_above_pad = jnp.maximum(z - 500.0, 0.0)
+    closeness = jnp.exp(-altitude_above_pad / 100.0)
+    vz_shaping = 0.5 * closeness * jnp.clip(vz + 5.0, -10.0, 5.0)
+
+    step_reward = (
+        distance_penalty
+        + time_penalty
+        + alignment_bonus
+        + velocity_penalty
+        + upright_penalty
+        + spin_penalty
+        + throttle_penalty + vz_shaping
+    )
+
+    ground_z   = get_terrain_elevation(pos[0], pos[1])
     is_grounded = z <= ground_z
-    
-    safe_impact = (vz >= SAFE_Z_VELOCITY) & (jnp.linalg.norm(vel[0:2]) <= SAFE_XY_VELOCITY)
+
+    vz_safe      = vz >= SAFE_Z_VELOCITY                           
+    vxy_safe     = jnp.linalg.norm(vel[0:2]) <= SAFE_XY_VELOCITY  
+    safe_impact  = vz_safe & vxy_safe
     upright_impact = q[0] > 0.95
-    
+
     successful_landing = is_grounded & safe_impact & upright_impact
-    crash = is_grounded & ~(safe_impact & upright_impact)
+    crash              = is_grounded & ~(safe_impact & upright_impact)
+    flew_away          = z > 3000.0
 
-    impact_speed = jnp.linalg.norm(vel)
-    crash_shaped_penalty = -200.0 - (xy_dist * 2.0) - (impact_speed * 100.0)
+    impact_speed        = jnp.linalg.norm(vel)
+    xy_dist             = jnp.linalg.norm(pos[0:2])
+    crash_shaped_penalty = -50.0 - (xy_dist * 0.1) - (impact_speed * 10.0)
 
-    terminal_reward = jnp.where(successful_landing, 5000.0, 0.0)
-    terminal_reward = jnp.where(crash, crash_shaped_penalty, terminal_reward)
+    terminal_reward = jnp.where(successful_landing, 500.0,          0.0)
+    terminal_reward = jnp.where(crash,              crash_shaped_penalty, terminal_reward)
+    terminal_reward = jnp.where(flew_away,          -200.0,         terminal_reward)
 
-    flew_away = z > 3000.0
-    terminal_reward = jnp.where(flew_away, -10000.0, terminal_reward)
-    
-    fuel_empty = mass <= DRY_MASS
-    step_reward = jnp.where(fuel_empty & ~is_grounded, step_reward - 100.0, step_reward)
-    
+    fuel_empty  = mass <= DRY_MASS
+    step_reward = jnp.where(fuel_empty & ~is_grounded, step_reward - 10.0, step_reward)
+
     total_reward = jnp.where(is_grounded | flew_away, terminal_reward, step_reward)
-    
-    return total_reward / 1000.0
+
+    return total_reward  
 
 # Environment step
 @jax.jit
