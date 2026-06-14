@@ -66,11 +66,14 @@ def quaternion_rotate(q, v):
     return jnp.dot(R, v)
 
 @jax.jit
-def calc_dynamics(state, action):
+def calc_dynamics(state, action, wind_accel=jnp.zeros(3), gravity_scale=1.0, drag_scale=1.0):
     """
     Calculates the derivatives of the state given current actions.
     State: [x, y, z, vx, vy, vz, q0, q1, q2, q3, wx, wy, wz, mass]
     Action: [u1, ..., u8] (Throttle values 0.0 to 1.0)
+    wind_accel: external horizontal wind-gust acceleration [ax, ay, 0] (m/s^2).
+    gravity_scale, drag_scale: multipliers for post-training robustness tests.
+    Both 1.0 = nominal Mars conditions used during training.
     """
     pos = state[0:3]
     vel = state[3:6]
@@ -98,10 +101,10 @@ def calc_dynamics(state, action):
     rho = calc_density(pos[2])
     
     v_hat = jnp.where(speed > 1e-6, vel / speed, jnp.zeros_like(vel))
-    drag_inertial = -0.5 * rho * (speed**2) * CD * AREA * v_hat
+    drag_inertial = -0.5 * rho * (speed**2) * CD * AREA * v_hat * drag_scale
 
-    # Translational acceleration
-    accel = (thrust_inertial + drag_inertial) / mass + G_MARS
+    # Translational acceleration (gravity + thrust + drag + wind-gust disturbance)
+    accel = (thrust_inertial + drag_inertial) / mass + G_MARS * gravity_scale + wind_accel
 
     # Rotational acceleration
     omega_dot = jnp.dot(I_INV, (total_torque_body - jnp.cross(omega, jnp.dot(I_MAT, omega))))
@@ -121,9 +124,9 @@ def calc_dynamics(state, action):
     return state_dot
 
 @jax.jit
-def euler_step(state, action, dt):
+def euler_step(state, action, dt, wind_accel=jnp.zeros(3), gravity_scale=1.0, drag_scale=1.0):
     """Simple Euler integration step."""
-    state_dot = calc_dynamics(state, action)
+    state_dot = calc_dynamics(state, action, wind_accel, gravity_scale, drag_scale)
     new_state = state + state_dot * dt
     
     q_new = new_state[6:10]
