@@ -1,2 +1,7 @@
 __pycache__/
+*.pyc
 .venv/
+*.log
+weights_seed*/
+logs/training_log_abl_*.csv
+logs/training_log_sens_*.csv
