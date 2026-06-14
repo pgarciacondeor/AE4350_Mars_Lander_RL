@@ -1,307 +1,411 @@
+import os
+import sys
+import csv
+import time
+import pickle
+
+sys.stdout.reconfigure(line_buffering=True) 
+
 import jax
 import jax.numpy as jnp
 import jax.tree_util
 import optax
-import flax.linen as nn
-from flax.training.train_state import TrainState
 import numpy as np
-import time
-import pickle
-import csv
+from flax.training.train_state import TrainState
 
 import env
 import agent
 
 # Hyperparameters
-NUM_ENVS = 1000             
-NUM_STEPS = 500             
-TOTAL_UPDATES = 2000         
-LEARNING_RATE = 3e-4
-GAMMA = 0.995                
-GAE_LAMBDA = 0.95           # Smoothing factor for advantage
-CLIP_EPSILON = 0.2          # PPO clipping parameter
-EPOCHS = 4                  # How many times to reuse rollout data per update
-BATCH_SIZE = 4096     
-ENTROPY_COEF = 0.02     
+def _int_env(name, default):
+    return int(os.environ.get(name, default))
 
-# Jax vectorizing
-v_reset = jax.vmap(env.reset, in_axes=(0, None))
+NUM_ENVS      = _int_env("MARS_NUM_ENVS", 1000)
+NUM_STEPS     = _int_env("MARS_NUM_STEPS", 256)
+TOTAL_UPDATES = _int_env("MARS_TOTAL_UPDATES", 2000)
+START_STAGE   = _int_env("MARS_START_STAGE", 0)
+FREEZE_STAGE  = _int_env("MARS_FREEZE_STAGE", 0)   # 1 = disable curriculum advance
+SEED          = _int_env("MARS_SEED", 42)          # RNG seed
+LOG_EVERY     = _int_env("MARS_LOG_EVERY", 10)
+
+# output paths (configurable so parallel runs don't clash)
+LOG_CSV     = os.environ.get("MARS_LOG_CSV", "training_log.csv")
+WEIGHTS_DIR = os.environ.get("MARS_WEIGHTS_DIR", "weights")
+
+def _float_env(name, default):
+    return float(os.environ.get(name, default))
+
+LEARNING_RATE = 3e-4
+GAMMA         = _float_env("MARS_GAMMA", 0.99)   
+GAE_LAMBDA    = 0.95
+CLIP_EPSILON  = 0.2
+EPOCHS        = 4
+NUM_MINIBATCHES = 8
+ENTROPY_COEF  = 0.001   
+MAX_GRAD_NORM = 0.5
+TARGET_KL     = _float_env("MARS_TARGET_KL", 0.02)   
+
+# Curriculum
+ADVANCE_THRESHOLD = _float_env("MARS_ADVANCE_THRESHOLD", 0.90)  # every prior stage must clear this to advance
+STOP_THRESHOLD    = _float_env("MARS_STOP_THRESHOLD", 0.90)     # stop once top stage hits this
+MIN_UPDATES_PER_STAGE = _int_env("MARS_MIN_UPDATES_PER_STAGE", 30)  # min time before another advance
+ADAPTIVE_SAMPLING = _int_env("MARS_ADAPTIVE_SAMPLING", 1)  # 0 = uniform over unlocked stages
+MAX_STAGE = 3
+
+# Vectorised env helpers
+v_reset = jax.vmap(env.reset, in_axes=(0, None, None, None))
 v_step = jax.vmap(env.step, in_axes=(0, 0))
+v_observe = jax.vmap(env.observe)
 v_sample_action = jax.vmap(agent.sample_action, in_axes=(0, None, 0))
 v_calc_log_prob = jax.vmap(agent.calc_log_prob, in_axes=(0, 0, None))
 
-# Generalized Advantage Estimation (GAE)
+OBS_DIM = 16   # 14-dim physics state + 2-dim current wind gust
+
+# running mean/std for return normalisation
+class RunningMeanStd:
+    def __init__(self):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 1e-4
+
+    def update(self, x):
+        x = np.asarray(x, dtype=np.float64).reshape(-1)
+        batch_mean = x.mean()
+        batch_var = x.var()
+        batch_count = x.size
+
+        delta = batch_mean - self.mean
+        tot = self.count + batch_count
+        new_mean = self.mean + delta * batch_count / tot
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta ** 2 * self.count * batch_count / tot
+        self.mean = new_mean
+        self.var = M2 / tot
+        self.count = tot
+
+    @property
+    def std(self):
+        return float(np.sqrt(self.var) + 1e-8)
+
+
+# GAE (advantages + returns in real reward space)
 @jax.jit
 def compute_gae(rewards, values, next_value, dones):
-    """Calculates Advantages and Returns using jax.lax.scan for insane speed."""
-
     def body(carry, transition):
         gae, next_val = carry
         r, v, d = transition
-        
         delta = r + GAMMA * next_val * (1.0 - d) - v
         gae = delta + GAMMA * GAE_LAMBDA * (1.0 - d) * gae
         return (gae, v), gae
 
     initial_gae = jnp.zeros_like(next_value)
-
-    _, advantages = jax.lax.scan(
-        body, 
-        (initial_gae, next_value), 
-        (rewards, values, dones), 
-        reverse=True
-    )
+    _, advantages = jax.lax.scan(body, (initial_gae, next_value), (rewards, values, dones), reverse=True)
     returns = advantages + values
     return advantages, returns
 
-# Training state initialization
-def create_train_state(rng, learning_rate, resume_update=0):
-    """Initializes the Actor-Critic network and Optax optimizer."""
-    network = agent.ActorCritic()
-    
+
+def make_lr_schedule(resume_update):
+
+    steps_per_update = EPOCHS * NUM_MINIBATCHES
+    total_opt_steps = TOTAL_UPDATES * steps_per_update
+
+    return optax.linear_schedule(init_value=LEARNING_RATE * (1.0 - resume_update / TOTAL_UPDATES), end_value=0.0, transition_steps=max(1, total_opt_steps - resume_update * steps_per_update),)
+
+def create_states(rng, resume_update=0):
+    actor_net = agent.Actor()
+    critic_net = agent.Critic()
+    dummy = jnp.zeros((1, OBS_DIM))
+
+    rng, a_rng, c_rng = jax.random.split(rng, 3)
+
     if resume_update > 0:
-        print(f"Loading checkpoint from Update {resume_update}...")
-        with open(f'weights/model_weights_checkpoint_{resume_update:04d}.pkl', 'rb') as f:
-            params = pickle.load(f)
+        with open(os.path.join(WEIGHTS_DIR, f'actor_checkpoint_{resume_update:04d}.pkl'), 'rb') as f:
+            actor_params = pickle.load(f)
+        with open(os.path.join(WEIGHTS_DIR, f'critic_checkpoint_{resume_update:04d}.pkl'), 'rb') as f:
+            critic_params = pickle.load(f)
+
     else:
-        dummy_obs = jnp.zeros((1, 14))
-        params = network.init(rng, dummy_obs)['params']
-    
-    current_lr = learning_rate * (1.0 - (resume_update / TOTAL_UPDATES))
-    remaining_steps = TOTAL_UPDATES - resume_update
-    
-    schedule = optax.linear_schedule(
-        init_value=current_lr, 
-        end_value=0.0, 
-        transition_steps=remaining_steps
-    )
-    tx = optax.adam(learning_rate=schedule)
-    
-    return TrainState.create(apply_fn=network.apply, params=params, tx=tx)
+        actor_params = actor_net.init(a_rng, dummy)['params']
+        critic_params = critic_net.init(c_rng, dummy)['params']
 
-# Single PPO step
+    schedule = make_lr_schedule(resume_update)
+    actor_tx = optax.chain(optax.clip_by_global_norm(MAX_GRAD_NORM), optax.adam(schedule))
+    critic_tx = optax.chain(optax.clip_by_global_norm(MAX_GRAD_NORM), optax.adam(schedule))
+
+    actor_state = TrainState.create(apply_fn=actor_net.apply, params=actor_params, tx=actor_tx)
+    critic_state = TrainState.create(apply_fn=critic_net.apply, params=critic_params, tx=critic_tx)
+
+    return actor_state, critic_state
+
 @jax.jit
-def ppo_update(train_state, states, actions, old_log_probs, advantages, returns):
-    """Performs one gradient descent step on a batch of data."""
+def actor_update(state, states, actions, old_log_probs, advantages):
+
     def loss_fn(params):
-        # We use our custom PPO loss function from agent.py
-        total_loss, metrics = agent.ppo_loss_fn(
-            params, train_state.apply_fn, states, actions, 
-            old_log_probs, advantages, returns, clip_ratio=CLIP_EPSILON
-        )
-        return total_loss, metrics
-
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (_, metrics), grads = grad_fn(train_state.params)
+        return agent.actor_loss_fn(params, state.apply_fn, states, actions, old_log_probs, advantages, clip_ratio=CLIP_EPSILON, ent_coef=ENTROPY_COEF)
     
-    train_state = train_state.apply_gradients(grads=grads)
-    return train_state, metrics
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (_, aux), grads = grad_fn(state.params)
+    state = state.apply_gradients(grads=grads)
 
-# Training loop
+    return state, aux
+
+
+@jax.jit
+def critic_update(state, states, target_values):
+
+    def loss_fn(params):
+        return agent.critic_loss_fn(params, state.apply_fn, states, target_values)
+    
+    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+    (_, value_loss), grads = grad_fn(state.params)
+    state = state.apply_gradients(grads=grads)
+
+    return state, value_loss
+
+
+# roll out the deterministic policy for one episode and print it
+def trace_episode(actor_state, stage, seed=99):
+
+    rng = jax.random.PRNGKey(seed)
+    env_state = env.reset(rng, jnp.int32(stage), fixed_stage=jnp.int32(stage))
+    total = 0.0
+
+    for i in range(env.MAX_STEPS):
+        mean, _ = actor_state.apply_fn({'params': actor_state.params}, env.observe(env_state)[None])
+        action = mean[0]
+        env_state, phys, reward, done = env.step(env_state, action)
+        total += float(reward)
+
+        if i < 2 or done or i % 40 == 0:
+            print(f"    step {i:3d} | z={float(phys[2]):6.1f} | vz={float(phys[5]):6.2f} "
+                  f"| sp={float(jnp.linalg.norm(phys[3:6])):5.2f} | thr={float(jnp.mean(action)):.2f} "
+                  f"| r={float(reward):7.2f} | cum={total:8.2f}")
+            
+        if done:
+            print(f"    -> done @ step {i}, total={total:.2f}")
+            break
+
+
 def main():
+    os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
     RESUME_UPDATE = 0
-    STAGE = 0
+    stage = START_STAGE
+    last_advance_update = RESUME_UPDATE
+    stage_weights = (jnp.arange(4) <= stage).astype(jnp.float32)
 
-    rng = jax.random.PRNGKey(42)
+    rng = jax.random.PRNGKey(SEED)
     rng, net_rng = jax.random.split(rng)
-    
-    train_state = create_train_state(net_rng, LEARNING_RATE, RESUME_UPDATE)
-    
+    actor_state, critic_state = create_states(net_rng, RESUME_UPDATE)
+    ret_rms = RunningMeanStd()
+
     rng, reset_rng = jax.random.split(rng)
-    reset_rngs = jax.random.split(reset_rng, NUM_ENVS)
-    env_states = v_reset(reset_rngs, STAGE)
-    
-    print(f"Starting Training: {NUM_ENVS} parallel landers...")
+    env_states = v_reset(jax.random.split(reset_rng, NUM_ENVS), stage, -1, stage_weights)
+
+    print(f"Training: {NUM_ENVS} envs x {NUM_STEPS} steps, {TOTAL_UPDATES} updates, "
+          f"start stage {stage} (backend={jax.default_backend()})")
     start_time = time.time()
 
     if RESUME_UPDATE == 0:
-        with open('training_log.csv', 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m', 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Stage', 'Success_Rate', 'Time'])
-    else:
-        print(f"Resuming logging from Update {RESUME_UPDATE}...")
+        with open(LOG_CSV, 'w', newline='') as f:
+            csv.writer(f).writerow(
+                ['Update', 'Avg_Reward', 'Avg_Ep_Length', 'Miss_Dist_m',
+                 'Impact_Speed_ms', 'Policy_Loss', 'Value_Loss', 'Stage',
+                 'Success_Rate', 'Entropy', 'KL', 'Time']
+                + [f'Succ_S{s}' for s in range(MAX_STAGE + 1)])
+
+    minibatch_size = (NUM_ENVS * NUM_STEPS) // NUM_MINIBATCHES
+    stop_training = False
+    best_score = -1.0 
 
     for update in range(RESUME_UPDATE, TOTAL_UPDATES):
-        
-        batch_states = []
-        batch_actions = []
-        batch_rewards = []
-        batch_values = []
-        batch_log_probs = []
-        batch_dones = []
-        
-        # Rollout (collecting data)
-        for step in range(NUM_STEPS):
+
+        if update % LOG_EVERY == 0:
+            print(f"\n=== trace @ update {update} (stage {stage}) ===")
+            trace_episode(actor_state, stage)
+
+        b_states, b_next_states, b_actions = [], [], []
+        b_rewards, b_values, b_log_probs, b_dones, b_stages = [], [], [], [], []
+
+        ret_mean, ret_std = ret_rms.mean, ret_rms.std
+
+        # rollout
+        for _ in range(NUM_STEPS):
+            obs_in = v_observe(env_states)
+            mean, log_std = actor_state.apply_fn({'params': actor_state.params}, obs_in)
+            value_norm = critic_state.apply_fn({'params': critic_state.params}, obs_in)
+
             rng, action_rng = jax.random.split(rng)
-            
-            # Forward pass - get action means and values from network
-            mean, log_std, value = train_state.apply_fn({'params': train_state.params}, env_states.physics_state)
-            
-            # Sample actions with noise for exploration
-            action_rngs = jax.random.split(action_rng, NUM_ENVS)
-            action = v_sample_action(mean, log_std, action_rngs)
+            action = v_sample_action(mean, log_std, jax.random.split(action_rng, NUM_ENVS))
             log_prob = v_calc_log_prob(action, mean, log_std)
-            
-            # Step all 1000 environments simultaneously
-            next_env_states, next_physics_states, reward, done = v_step(env_states, action)
-            
-            # Store
-            batch_states.append(env_states.physics_state)
-            batch_actions.append(action)
-            batch_rewards.append(reward)
-            batch_values.append(jnp.squeeze(value))
-            batch_log_probs.append(log_prob)
-            batch_dones.append(done)
-            
-            # Advance
+
+            next_env_states, next_phys, reward, done = v_step(env_states, action)
+
+            b_states.append(obs_in)
+            b_next_states.append(next_phys)
+            b_actions.append(action)
+            b_rewards.append(reward)
+            b_values.append(value_norm * ret_std + ret_mean)  
+            b_log_probs.append(log_prob)
+            b_dones.append(done)
+            b_stages.append(env_states.stage)
+
             rng, reset_rng = jax.random.split(rng)
-            fresh_env_states = v_reset(jax.random.split(reset_rng, NUM_ENVS), STAGE)
-            
-            env_states = jax.tree_util.tree_map(
-                lambda next_s, fresh_s: jnp.where(
-                    done[:, None] if next_s.ndim > 1 else done, 
-                    fresh_s, next_s
-                ),
-                next_env_states, fresh_env_states
-            )
+            fresh = v_reset(jax.random.split(reset_rng, NUM_ENVS), stage, -1, stage_weights)
+            env_states = jax.tree_util.tree_map(lambda nxt, fr: jnp.where(done[:, None] if nxt.ndim > 1 else done, fr, nxt), next_env_states, fresh)
 
-        batch_states = jnp.stack(batch_states)
-        batch_actions = jnp.stack(batch_actions)
-        batch_rewards = jnp.stack(batch_rewards)
-        batch_values = jnp.stack(batch_values)
-        batch_log_probs = jnp.stack(batch_log_probs)
-        batch_dones = jnp.stack(batch_dones)
-        
-        # Calculate advantages
-        _, _, next_value = train_state.apply_fn({'params': train_state.params}, env_states.physics_state)
-        next_value = jnp.squeeze(next_value)
-        
-        advantages, returns = compute_gae(batch_rewards, batch_values, next_value, batch_dones)
-        
-        flat_states = batch_states.reshape(-1, 14)
-        flat_actions = batch_actions.reshape(-1, 8)
-        flat_log_probs = batch_log_probs.reshape(-1)
+        b_states = jnp.stack(b_states)
+        b_next_states = jnp.stack(b_next_states)
+        b_actions = jnp.stack(b_actions)
+        b_rewards = jnp.stack(b_rewards)
+        b_values = jnp.stack(b_values)
+        b_log_probs = jnp.stack(b_log_probs)
+        b_dones = jnp.stack(b_dones).astype(jnp.float32)
+        b_stages = jnp.stack(b_stages)
+
+        next_value_norm = critic_state.apply_fn({'params': critic_state.params},
+                                                v_observe(env_states))
+        next_value = next_value_norm * ret_std + ret_mean
+
+        advantages, returns = compute_gae(b_rewards, b_values, next_value, b_dones)
+
+        ret_rms.update(np.asarray(returns))
+        target_values = (returns - ret_rms.mean) / ret_rms.std
+
+        flat_states = b_states.reshape(-1, OBS_DIM)
+        flat_actions = b_actions.reshape(-1, 8)
+        flat_log_probs = b_log_probs.reshape(-1)
         flat_advantages = advantages.reshape(-1)
-        flat_returns = returns.reshape(-1)
-        
-        # Normalize advantages
+        flat_targets = target_values.reshape(-1)
+
         flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
-        
-        # Optimize network
-        num_transitions = NUM_ENVS * NUM_STEPS
-        num_minibatches = num_transitions // BATCH_SIZE
-        valid_transitions = num_minibatches * BATCH_SIZE
 
-        for epoch in range(EPOCHS):
-            
+        num_transitions = flat_states.shape[0]
+        last_metrics = (0.0, 0.0, 0.0, 0.0, 0.0)
+        stop_epochs = False
+        for _ in range(EPOCHS):
+            if stop_epochs:
+                break
             rng, perm_rng = jax.random.split(rng)
-            permutation = jax.random.permutation(perm_rng, num_transitions)[:valid_transitions]
-            
-            shuffled_states = flat_states[permutation]
-            shuffled_actions = flat_actions[permutation]
-            shuffled_log_probs = flat_log_probs[permutation]
-            shuffled_advantages = flat_advantages[permutation]
-            shuffled_returns = flat_returns[permutation]
-            
-            batch_states_reshaped = shuffled_states.reshape((num_minibatches, BATCH_SIZE, -1))
-            batch_actions_reshaped = shuffled_actions.reshape((num_minibatches, BATCH_SIZE, -1))
-            batch_log_probs_reshaped = shuffled_log_probs.reshape((num_minibatches, BATCH_SIZE))
-            batch_advantages_reshaped = shuffled_advantages.reshape((num_minibatches, BATCH_SIZE))
-            batch_returns_reshaped = shuffled_returns.reshape((num_minibatches, BATCH_SIZE))
-            
-            for b in range(num_minibatches):
-                train_state, (policy_loss, value_loss, entropy_loss) = ppo_update(
-                    train_state, 
-                    batch_states_reshaped[b], 
-                    batch_actions_reshaped[b], 
-                    batch_log_probs_reshaped[b], 
-                    batch_advantages_reshaped[b], 
-                    batch_returns_reshaped[b]
-                )
+            perm = jax.random.permutation(perm_rng, num_transitions)
+            for start in range(0, num_transitions, minibatch_size):
+                idx = perm[start:start + minibatch_size]
+                actor_state, (p_loss, ent_loss, kl, clip_frac) = actor_update(
+                    actor_state, flat_states[idx], flat_actions[idx],
+                    flat_log_probs[idx], flat_advantages[idx])
+                critic_state, v_loss = critic_update(
+                    critic_state, flat_states[idx], flat_targets[idx])
+                last_metrics = (p_loss, v_loss, ent_loss, kl, clip_frac)
 
-        if update % 10 == 0:
+                # stop early if the policy moved too far
+                if float(kl) > 1.5 * TARGET_KL:
+                    stop_epochs = True
+                    break
 
-            if update == 0:
-                print(f"  DEBUG: batch_rewards min={float(jnp.min(batch_rewards)):.3f} max={float(jnp.max(batch_rewards)):.3f} mean={float(jnp.mean(batch_rewards)):.3f}")
-                print(f"  DEBUG: single ep reward sum = {float(jnp.sum(batch_rewards[:, 0])):.3f}")
-                print(f"  DEBUG: steps until first done env 0 = {int(jnp.argmax(batch_dones[:, 0]))}")
+        # metrics
+        if update % LOG_EVERY == 0:
+            p_loss, v_loss, ent_loss, kl, clip_frac = (float(x) for x in last_metrics)
 
-                grad_fn = jax.value_and_grad(lambda p: agent.ppo_loss_fn(
-                    p, train_state.apply_fn, batch_states_reshaped[0],
-                    batch_actions_reshaped[0], batch_log_probs_reshaped[0],
-                    batch_advantages_reshaped[0], batch_returns_reshaped[0]
-                )[0], has_aux=False)
-                _, grads = grad_fn(train_state.params)
-                grad_norm = sum(jnp.sum(g**2) for g in jax.tree_util.tree_leaves(grads)) ** 0.5
-                print(f"  DEBUG: grad norm = {float(grad_norm):.6f}")
+            done_mask = b_dones.astype(bool)
+            term_states = b_next_states[done_mask]   
+            n_term = int(term_states.shape[0])
 
-                print(f"  DEBUG: advantages mean={float(flat_advantages.mean()):.4f} std={float(flat_advantages.std()):.4f}")
-                print(f"  DEBUG: returns mean={float(flat_returns.mean()):.4f} std={float(flat_returns.std()):.4f}")
+            per_stage_sr = [0.0] * (MAX_STAGE + 1)   
+            per_stage_cnt = [0] * (MAX_STAGE + 1)
 
-            terminal_mask = batch_dones  
-            terminal_states_flat = batch_states[terminal_mask] 
+            if n_term > 0:
+                tvel = term_states[:, 3:6]
+                tpos = term_states[:, 0:3]
+                tq = term_states[:, 6:10]
+                vz_ok = tvel[:, 2] >= env.SAFE_Z_VELOCITY
+                vxy_ok = jnp.linalg.norm(tvel[:, 0:2], axis=1) <= env.SAFE_XY_VELOCITY
+                upright_ok = tq[:, 0] > 0.95
+                on_pad = jnp.linalg.norm(tpos[:, 0:2], axis=1) < env.PAD_RADIUS
+                grounded = tpos[:, 2] <= 502.0   
+                succ_vec = np.asarray(vz_ok & vxy_ok & upright_ok & on_pad & grounded)
+                successes = int(succ_vec.sum())
+                success_rate = successes / n_term
+                avg_miss = float(jnp.mean(jnp.linalg.norm(tpos[:, 0:2], axis=1)))
+                avg_impact = float(jnp.mean(jnp.linalg.norm(tvel, axis=1)))
 
-            if len(terminal_states_flat) > 0:
-                term_vel = terminal_states_flat[:, 3:6]
-                term_pos = terminal_states_flat[:, 0:3]
-                term_q   = terminal_states_flat[:, 6:10]
-                
-                vz_ok      = term_vel[:, 2] >= env.SAFE_Z_VELOCITY          
-                vxy_ok     = jnp.linalg.norm(term_vel[:, 0:2], axis=1) <= env.SAFE_XY_VELOCITY
-                upright_ok = term_q[:, 0] > 0.95
-                on_pad_ok  = jnp.linalg.norm(term_pos[:, 0:2], axis=1) < 100.0 
-                
-                successes = jnp.sum(vz_ok & vxy_ok & upright_ok & on_pad_ok)
-                success_rate = float(successes) / max(1, len(terminal_states_flat))
+                # Per-stage success
+                term_stage = np.asarray(b_stages.astype(jnp.int32))[np.asarray(done_mask)]
+                for s in range(MAX_STAGE + 1):
+                    m = term_stage == s
+                    per_stage_cnt[s] = int(m.sum())
+                    if per_stage_cnt[s] > 0:
+                        per_stage_sr[s] = float(succ_vec[m].mean())
+
             else:
-                successes = 0
-                success_rate = 0.0
+                successes, success_rate, avg_miss, avg_impact = 0, 0.0, 0.0, 0.0
 
-            ADVANCE_THRESHOLD = 0.50  
-            if success_rate >= ADVANCE_THRESHOLD and STAGE < 3:
-                STAGE = min(STAGE + 1, 3)
-                print(f"  *** CURRICULUM ADVANCE → Stage {STAGE} (success rate: {success_rate:.1%}) ***")
+            # Average undiscounted return per episode
+            not_done = jnp.concatenate(
+                [jnp.ones((1, NUM_ENVS)), jnp.cumprod(1.0 - b_dones[:-1], axis=0)], axis=0)
+            avg_reward = float(jnp.mean(jnp.sum(b_rewards * not_done, axis=0)))
+            avg_ep_len = (NUM_ENVS * NUM_STEPS) / max(1.0, float(jnp.sum(b_dones)))
 
-            not_done_mask = jnp.concatenate([jnp.ones((1, NUM_ENVS), dtype=jnp.float32), jnp.cumprod(1.0 - batch_dones[:-1].astype(jnp.float32), axis=0)], axis=0)
-            masked_rewards = batch_rewards * not_done_mask
-            avg_reward = float(jnp.mean(jnp.sum(masked_rewards, axis=0)))
-            
-            total_dones = jnp.sum(batch_dones)
-            avg_ep_length = (NUM_ENVS * NUM_STEPS) / jnp.maximum(1.0, total_dones) 
-            
-            terminal_states = batch_states[batch_dones]
-            
-            if len(terminal_states) > 0:
-                miss_distances = jnp.linalg.norm(terminal_states[:, 0:2], axis=-1)
-                avg_miss = float(jnp.mean(miss_distances))
-                
-                impact_speeds = jnp.linalg.norm(terminal_states[:, 3:6], axis=-1)
-                avg_impact = float(jnp.mean(impact_speeds))
-            else:
-                avg_miss = 0.0
-                avg_impact = 0.0
-            
+            # advance only when EVERY unlocked stage is mastered after minimum time
+            all_mastered = all(per_stage_sr[s] >= ADVANCE_THRESHOLD and per_stage_cnt[s] >= 20 for s in range(stage + 1))
+
+            if not FREEZE_STAGE and (update - last_advance_update) >= MIN_UPDATES_PER_STAGE:
+                if stage < MAX_STAGE and all_mastered:
+                    stage += 1
+                    last_advance_update = update
+                    print(f"  *** CURRICULUM ADVANCE -> stage {stage} "
+                          f"(all stages S0-S{stage-1} >= {ADVANCE_THRESHOLD:.0%}) ***")
+                    
+                elif stage == MAX_STAGE and all_mastered and per_stage_sr[stage] >= STOP_THRESHOLD:
+                    print(f"  *** ALL STAGES MASTERED (>= {STOP_THRESHOLD:.0%}) - stopping early ***")
+                    stop_training = True
+
+            # adaptive sampling - practise the weakest unlocked stage most, floor keeps mastered ones rehearsed
+            w = [0.0] * (MAX_STAGE + 1)
+            for s in range(stage + 1):
+                w[s] = (0.15 + (1.0 - per_stage_sr[s])) if ADAPTIVE_SAMPLING else 1.0
+            stage_weights = jnp.array(w)
+
+            # checkpoint the peak high-stage policy so a later collapse never loses it
+            hs_score = per_stage_sr[2] + 2.0 * per_stage_sr[3]
+            if hs_score > best_score and update > 0:
+                best_score = hs_score
+                with open(os.path.join(WEIGHTS_DIR, 'actor_best.pkl'), 'wb') as f:
+                    pickle.dump(actor_state.params, f)
+                with open(os.path.join(WEIGHTS_DIR, 'critic_best.pkl'), 'wb') as f:
+                    pickle.dump(critic_state.params, f)
+
             elapsed = time.time() - start_time
-            
-            float_reward = float(avg_reward)
-            float_length = float(avg_ep_length)
-            float_ploss = float(policy_loss)
-            float_vloss = float(value_loss)
-            
-            print(f"Up: {update:04d} | " f"Stage: {STAGE} | " f"R: {float_reward:7.1f} | " f"Len: {float_length:6.1f} | "f"Success: {success_rate:5.1%} ({int(successes):4d}/{max(1,len(terminal_states_flat)):4d}) | " f"Miss: {avg_miss:6.1f}m | " f"Impact: {avg_impact:5.1f}m/s | " f"V-Loss: {float_vloss:6.3f} | " f"P-Loss: {float_ploss:7.4f}")
+            per_stage_str = " ".join(
+                f"S{s}={per_stage_sr[s]:.0%}" for s in range(MAX_STAGE + 1))
+            print(f"Up {update:04d} | St {stage} | R {avg_reward:8.2f} | Len {avg_ep_len:6.1f} "
+                  f"| Succ {success_rate:5.1%} [{per_stage_str}] | Miss {avg_miss:6.1f}m "
+                  f"| Imp {avg_impact:5.1f} | VL {v_loss:7.3f} | PL {p_loss:7.4f} | "
+                  f"Ent {ent_loss:6.2f} | KL {kl:6.4f}")
 
-            with open('training_log.csv', 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([update, float_reward, float_length, avg_miss, avg_impact, float_ploss, float_vloss, STAGE, success_rate, elapsed])
-                
+            with open(LOG_CSV, 'a', newline='') as f:
+                csv.writer(f).writerow(
+                    [update, avg_reward, avg_ep_len, avg_miss, avg_impact,
+                     p_loss, v_loss, stage, success_rate, ent_loss, kl, elapsed]
+                    + per_stage_sr)
+
         if update % 100 == 0 and update > 0:
-            with open(f'weights/model_weights_checkpoint_{update:04d}.pkl', 'wb') as backup_file:
-                pickle.dump(train_state.params, backup_file)
+            with open(os.path.join(WEIGHTS_DIR, f'actor_checkpoint_{update:04d}.pkl'), 'wb') as f:
+                pickle.dump(actor_state.params, f)
+            with open(os.path.join(WEIGHTS_DIR, f'critic_checkpoint_{update:04d}.pkl'), 'wb') as f:
+                pickle.dump(critic_state.params, f)
 
-    with open('weights/model_weights.pkl', 'wb') as f:
-        pickle.dump(train_state.params, f)
-    print("Training complete. Model saved to weights/model_weights.pkl.")
+        if stop_training:
+            break
+
+    with open(os.path.join(WEIGHTS_DIR, 'actor_weights.pkl'), 'wb') as f:
+        pickle.dump(actor_state.params, f)
+
+    with open(os.path.join(WEIGHTS_DIR, 'critic_weights.pkl'), 'wb') as f:
+        pickle.dump(critic_state.params, f)
+
+    print("Training complete. Saved weights/actor_weights.pkl + critic_weights.pkl")
+
 
 if __name__ == "__main__":
     main()
