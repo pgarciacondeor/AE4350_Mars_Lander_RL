@@ -34,7 +34,7 @@ Behaviour is controlled by env vars (defaults in parentheses), e.g.:
 
 ## Files
 
-`physics.py` dynamics · `env.py` env + reward + curriculum · `agent.py` networks +
-PPO loss · `train.py` training loop · `analysis.py` figures (trajectories,
-state-action map, Monte-Carlo dispersion, robustness, training curves) ·
+`physics.py` dynamics, `env.py` env + reward + curriculum, `agent.py` networks +
+PPO loss, `train.py` training loop, `analysis.py` figures (trajectories,
+state-action map, Monte-Carlo dispersion, robustness, training curves),
 `test_physics_stages.py` / `test_reward.py` sanity checks.
