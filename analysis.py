@@ -706,13 +706,13 @@ def neuron_analysis(params, fname="figures/neuron_maps.png", n_lesion=1024):
         pc = ax.pcolormesh(AA, VV, h1[:, j].reshape(AA.shape), cmap="coolwarm", vmin=-1, vmax=1, shading="auto")
         ax.plot(alts[m], v_env[m], "k--", lw=2)
         mid = len(alts[m]) // 2
-        ax.text(alts[m][mid] + 4, v_env[m][mid], "$-v_{\\mathrm{safe}}$", fontsize=12, color="black", va="center", ha="left", bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=1))
+        ax.text(alts[m][mid] + 5, v_env[m][mid], "$-v_{\\mathrm{safe}}$", fontsize=18, color="black", va="center", ha="left", bbox=dict(facecolor="white", alpha=0.75, edgecolor="none", pad=1))
         role = "raises throttle" if meanw[j] > 0 else "cuts throttle"
         ax.set_title(f"neuron {j}: {role}", fontsize=16); ax.set_xlabel("altitude above pad [m]")
 
     axes[0].set_ylabel("vertical velocity $v_z$ [m/s]")
     fig.colorbar(pc, ax=axes, shrink=0.85, label="neuron activation")
-    fig.suptitle("Most throttle-influential hidden neurons vs. the braking envelope (dashed $-v_{\\mathrm{safe}}$)",
+    fig.suptitle("Most throttle-influential hidden neurons vs. the braking envelope",
                  fontsize=18)
     _save(fig, fname, pdf=True, pad=0.05)
 
