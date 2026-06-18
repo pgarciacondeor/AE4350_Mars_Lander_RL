@@ -269,7 +269,7 @@ def _obs_vec(alt, vz):
     phys = jnp.array([0.0, 0.0, z, 0.0, 0.0, vz, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, INITIAL_MASS])
     return jnp.concatenate([phys, jnp.zeros(2)])
 
-def state_action_map(params, fname="figures/state_action_map.png", alt_max=150.0):
+def state_action_map(params, fname="figures/state_action_map.png", alt_max=150.0, traj=None):
     alts = np.linspace(0, alt_max, 90)
     vzs = np.linspace(-15, 5, 90)
     AA, VV = np.meshgrid(alts, vzs)
@@ -287,6 +287,18 @@ def state_action_map(params, fname="figures/state_action_map.png", alt_max=150.0
     m = v_env >= vzs.min()
     ax.plot(alt_line[m], v_env[m], color="white", lw=3.0,
             label="braking envelope $-v_{\\mathrm{safe}}(h)$")
+    
+    if traj is not None:
+        import matplotlib.patheffects as pe
+        ta = np.asarray(traj["z"]) - PAD_Z; tv = np.asarray(traj["vz"])
+        inb = (ta >= 0) & (ta <= alt_max) & (tv >= vzs.min()) & (tv <= vzs.max())
+        stroke = [pe.withStroke(linewidth=4.5, foreground="white")]
+        ax.plot(ta[inb], tv[inb], color="black", lw=2.5, zorder=6,
+                path_effects=stroke, label="Stage 3 descent")
+        if inb.any():
+            ax.scatter(ta[inb][-1], tv[inb][-1], color="black", s=55, zorder=7,
+                       path_effects=stroke)
+            
     ax.set_ylim(vzs.min(), vzs.max())
     ax.legend(loc="upper right", framealpha=0.9)
     cb = fig.colorbar(pc, ax=ax, pad=0.02); cb.set_label("commanded mean throttle [%]")
@@ -441,19 +453,19 @@ def sensitivity_curves(fname="figures/sensitivity.png"):
 
     full = "logs/training_log_seed1.csv"
     sweeps = [
-        ("envelope coef (MARS_ENVELOPE_COEF)", [
+        ("braking-envelope coefficient", [
             ("0.00", "logs/training_log_abl_noenvelope_seed1.csv"),
             ("0.05", "logs/training_log_sens_env_005.csv"),
             ("0.10", "logs/training_log_sens_env_010.csv"),
             ("0.15 (used)", full),
             ("0.30", "logs/training_log_sens_env_030.csv"),
         ]),
-        ("discount factor (MARS_GAMMA)", [
+        ("discount factor $\\gamma$", [
             ("0.970", "logs/training_log_sens_gam_097.csv"),
             ("0.990 (used)", full),
             ("0.997\n(recomm.)", "logs/training_log_sens_gam_0997.csv"),
         ]),
-        ("lateral coef (MARS_LATERAL_COEF)", [
+        ("lateral-shaping coefficient", [
             ("0.0", "logs/training_log_abl_nolateral_seed1.csv"),
             ("1.0", "logs/training_log_sens_lat_10.csv"),
             ("3.0 (used)", full),
@@ -753,7 +765,7 @@ if __name__ == "__main__":
     params = load_actor()
     verify_simulator()
     generate_training_plots()
-    state_action_map(params)
+    state_action_map(params, traj=run_flight(params, stage=3, seed=10))
 
     stage_hists = []
 
