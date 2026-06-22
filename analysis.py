@@ -162,7 +162,7 @@ def plot_trajectory_dashboard(h, fname="figures/flight_dashboard.png"):
     ax.plot(t, h["speed"], color="tab:purple", lw=1.5, ls="--", label="$|v|$")
     ax.axhline(env.SAFE_Z_VELOCITY, color="red", ls=":", lw=1.2)
     ax.set_title("Velocity"); ax.set_xlabel("time [s]"); ax.set_ylabel("[m/s]"); ax.grid(alpha=0.3)
-    ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=16)
+    ax.legend(loc="upper right", fontsize=20)
 
     ax = axes[0, 2]
     ax.plot(t, h["mean_throttle"] * 100, color="tab:blue", lw=2)
@@ -173,20 +173,20 @@ def plot_trajectory_dashboard(h, fname="figures/flight_dashboard.png"):
     ax.plot(t, h["tilt_deg"], color="tab:red", lw=2)
     lim = np.degrees(2 * np.arccos(0.95))
     ax.axhline(lim, color="k", ls="--", lw=1)
-    ax.text(t[-1], lim, "upright limit ", fontsize=16, va="bottom", ha="right")
+    ax.text(t[-1], lim, "upright limit ", fontsize=19, va="bottom", ha="right")
     ax.set_title("Attitude (tilt)"); ax.set_xlabel("time [s]"); ax.set_ylabel("[deg]"); ax.grid(alpha=0.3)
 
     ax = axes[1, 1]
     ax.plot(t, h["horiz_dist"], color="tab:gray", lw=2)
     ax.axhline(env.PAD_RADIUS, color="red", ls="--", lw=1)
-    ax.text(t[-1], env.PAD_RADIUS, "pad radius ", fontsize=16, va="bottom", ha="right", color="red")
+    ax.text(t[-1], env.PAD_RADIUS, "pad radius ", fontsize=19, va="bottom", ha="right", color="red")
     ax.set_title("Horizontal distance"); ax.set_xlabel("time [s]"); ax.set_ylabel("[m]"); ax.grid(alpha=0.3)
 
     ax = axes[1, 2]
-    ax.plot(t, h["windx"], color="tab:cyan", lw=1.5, label="gust $a_x$")
-    ax.plot(t, h["windy"], color="tab:olive", lw=1.5, label="gust $a_y$")
+    ax.plot(t, h["windx"], color="tab:cyan", lw=1.5, label="$a_x$")
+    ax.plot(t, h["windy"], color="tab:olive", lw=1.5, label="$a_y$")
     ax.set_title("Wind-gust disturbance"); ax.set_xlabel("time [s]"); ax.set_ylabel("[m/s$^2$]"); ax.grid(alpha=0.3)
-    ax.legend(loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=16)
+    ax.legend(loc="lower left", fontsize=20)
 
     fig.suptitle("Landing behaviour over time", fontsize=23)
     _save(fig, fname, pdf=True)
@@ -232,7 +232,7 @@ def generate_training_plots(pattern="logs/training_log_seed*.csv", fname="figure
             ax.fill_between(x, m - sd, m + sd, alpha=0.25, color="tab:blue")
         if ref is not None:
             ax.axhline(ref, color="red", ls="--", lw=1)
-            ax.text(x[0], ref, f" {ref_label}", color="red", fontsize=16, va="bottom", ha="left")
+            ax.text(x[0], ref, f" {ref_label}", color="red", fontsize=19, va="top", ha="left")
         ax.set_title(title); ax.set_xlabel("update"); ax.set_ylabel(ylab); ax.grid(alpha=0.3)
 
     fig, axes = plt.subplots(2, 3, figsize=(17, 9), constrained_layout=True)
@@ -393,7 +393,7 @@ def robustness_panel(params, n=2048, fname="figures/robustness.png"):
     a.text(101, 4, "nominal", fontsize=16, va="bottom", ha="left", color="k")
     a.set_xlabel("parameter relative to training [%]"); a.set_ylabel("success rate [%]")
     a.set_ylim(-3, 105); a.set_title("Gravity / drag scaling (Stage 2)")
-    a.grid(alpha=0.3); a.legend(loc="lower center")
+    a.grid(alpha=0.3); a.legend(loc="lower center", fontsize=20)
 
     rl = lambda s: ACTOR.apply({"params": params}, v_observe(s))[0]
     healths = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
@@ -406,7 +406,7 @@ def robustness_panel(params, n=2048, fname="figures/robustness.png"):
         print(f"engine-fail stage {stage}: {[round(v,2) for v in sr]}")
     b.set_xlabel("thrust lost on one engine [%]"); b.set_ylabel("success rate [%]")
     b.set_ylim(-3, 105); b.set_title("Single-engine thrust loss (zero-shot)")
-    b.grid(alpha=0.3); b.legend(loc="upper right")
+    b.grid(alpha=0.3); b.legend(loc="upper right", fontsize=20)
 
     fig.suptitle("Post-training robustness to off-nominal conditions")
     _save(fig, fname, pdf=True)
@@ -676,7 +676,7 @@ def verify_simulator(fname="figures/sim_verification.png"):
     b.plot(tt[::14], analytic_v[::14], "o", color="red", ms=10, label="analytic $-g\\,t$")
     b.set_xlabel("time [s]"); b.set_ylabel("$v_z$ [m/s]")
     b.set_title("Free fall"); b.grid(alpha=0.3); b.legend(loc="lower left")
-    b.text(0.5, 0.93, f"max error = {err_v:.0e} m/s", transform=b.transAxes, fontsize=15, va="top", ha="center", color="0.35")
+    b.text(0.5, 0.93, f"max error = {err_v:.0e} m/s", transform=b.transAxes, fontsize=18, fontweight="bold", va="top", ha="center", color="0.2")
 
     speeds = np.linspace(0, 120, 60)
     rho = float(physics.calc_density(1000.0))
@@ -690,7 +690,7 @@ def verify_simulator(fname="figures/sim_verification.png"):
     c.set_xlabel("speed [m/s]"); c.set_ylabel("drag decel. [m/s$^2$]")
     c.set_title(f"Drag model ($\\rho$={rho:.4f} kg/m$^3$)")
     c.grid(alpha=0.3); c.legend(loc="upper left")
-    c.text(0.97, 0.05, f"max error = {err_d:.0e}", transform=c.transAxes, fontsize=15, va="bottom", ha="right", color="0.35")
+    c.text(0.97, 0.05, f"max error = {err_d:.0e}", transform=c.transAxes, fontsize=18, fontweight="bold", va="bottom", ha="right", color="0.2")
 
     fig.suptitle("Simulator verification")
     _save(fig, fname, pdf=True)
