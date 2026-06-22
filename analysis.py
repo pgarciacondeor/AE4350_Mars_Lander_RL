@@ -8,6 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Ellipse
+import matplotlib.patheffects as pe
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 
@@ -280,16 +281,17 @@ def state_action_map(params, fname="figures/state_action_map.png", alt_max=150.0
     pc = ax.pcolormesh(AA, VV, thr * 100, cmap="viridis", shading="auto")
     ax.axhline(env.SAFE_Z_VELOCITY, color="red", ls="--", lw=1.4)
     ax.text(alt_max * 0.99, env.SAFE_Z_VELOCITY, "safe $v_z$ ", color="red",
-            fontsize=18, va="bottom", ha="right")
-    # overlay the analytical braking envelope -v_safe(h); the learned boundary tracks it
+            fontsize=18, va="bottom", ha="right",
+            bbox=dict(facecolor="white", alpha=0.6, edgecolor="none", pad=1))
+    
     alt_line = np.linspace(0, alt_max, 300)
     v_env = -np.sqrt(2.0 * env.A_BRAKE * alt_line)
     m = v_env >= vzs.min()
     ax.plot(alt_line[m], v_env[m], color="white", lw=3.0,
+            path_effects=[pe.withStroke(linewidth=5, foreground="black")],
             label="braking envelope $-v_{\\mathrm{safe}}(h)$")
     
     if traj is not None:
-        import matplotlib.patheffects as pe
         ta = np.asarray(traj["z"]) - PAD_Z; tv = np.asarray(traj["vz"])
         inb = (ta >= 0) & (ta <= alt_max) & (tv >= vzs.min()) & (tv <= vzs.max())
         stroke = [pe.withStroke(linewidth=4.5, foreground="white")]
