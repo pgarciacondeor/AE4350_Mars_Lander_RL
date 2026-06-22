@@ -465,7 +465,7 @@ def sensitivity_curves(fname="figures/sensitivity.png"):
             ("0.990 (used)", full),
             ("0.997\n(recomm.)", "logs/training_log_sens_gam_0997.csv"),
         ]),
-        ("lateral-shaping coefficient", [
+        ("lateral-velocity shaping coefficient", [
             ("0.0", "logs/training_log_abl_nolateral_seed1.csv"),
             ("1.0", "logs/training_log_sens_lat_10.csv"),
             ("3.0 (used)", full),
@@ -484,7 +484,7 @@ def sensitivity_curves(fname="figures/sensitivity.png"):
                 ax.plot(r["Update"], r["Succ_S3"], lw=1.8, color=c, label=val_label)
         ax.set_xlabel("update"); ax.set_ylabel("stage-3 success rate")
         ax.set_title(title); ax.set_ylim(-0.02, 1.02); ax.grid(alpha=0.3)
-        ax.legend(loc="upper left", fontsize=14, title="value")
+        ax.legend(loc="upper left", fontsize=18, title="value", title_fontsize=18)
 
     fig.suptitle("Sensitivity analysis - stage-3 success across training", fontsize=23)
     _save(fig, fname, pdf=True)
