@@ -611,7 +611,8 @@ def plot_dispersion(mc, stage, fname="figures/dispersion.png"):
 
     g = mc["grounded"]
     x, y, vz = mc["x"][g], mc["y"][g], mc["vz"][g]
-    n = len(x)
+    n = len(x)              
+    n_total = len(g)        
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.8), constrained_layout=True)
 
     a = axes[0]
@@ -643,7 +644,7 @@ def plot_dispersion(mc, stage, fname="figures/dispersion.png"):
     b.set_xlabel("simulation #"); b.set_ylabel("terminal $v_z$ [m/s]")
     b.set_title("Terminal vertical velocity"); b.grid(alpha=0.3)
 
-    fig.suptitle(f"Monte-Carlo landing dispersion - stage {stage}, {n} runs", fontsize=23)
+    fig.suptitle(f"Monte-Carlo landing dispersion - stage {stage}, {n_total} runs", fontsize=23)
     _save(fig, fname, pdf=True)
 
 def verify_simulator(fname="figures/sim_verification.png"):
